@@ -17,16 +17,10 @@ export const registry: ToolEntry[] = [
     status: 'available',
   },
   {
-    name: 'skills',
-    summary: 'Install the shared skill pack into Claude Code and Codex',
-    pkg: '@devvoid/voidshift-skills',
-    status: 'planned',
-  },
-  {
     name: 'agents',
-    summary: 'Run configured agents in the background off Linear labels',
+    summary: 'Agents for Claude Code and Codex that plan, build and QA Linear cards',
     pkg: '@devvoid/voidshift-agents',
-    status: 'planned',
+    status: 'available',
   },
   {
     name: 'memory',
