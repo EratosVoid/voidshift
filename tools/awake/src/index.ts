@@ -1,7 +1,7 @@
 import { rmSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import { decide } from './decide.ts';
-import { DEFAULT_BATTERY_FLOOR, logPath, readState, stateDir, writeState } from './state.ts';
+import { logPath, readState, stateDir, writeState } from './state.ts';
 import {
   SUDOERS_PATH,
   installSudoers,
@@ -40,7 +40,7 @@ async function on(args: string[], ctx: ToolContext): Promise<number> {
     ctx.log('Could not read that time. Try --until 7am, --until 19:30 or --for 6h.');
     return 2;
   }
-  const floor = values.battery ? Number(values.battery) : DEFAULT_BATTERY_FLOOR;
+  const floor = values.battery ? Number(values.battery) : readState(ctx.configDir).batteryFloor;
   if (!Number.isInteger(floor) || floor < 5 || floor > 95) {
     ctx.log('--battery takes a whole percentage between 5 and 95.');
     return 2;
@@ -109,13 +109,18 @@ const awake: Tool = {
 
   async install(ctx) {
     if (process.platform !== 'darwin') throw new Error('awake runs on macOS only');
+    const state = readState(ctx.configDir);
+    const floor = await ctx.ui.text('Turn sleep back on at what battery level (%)?', {
+      initial: String(state.batteryFloor),
+      validate: (v) => (/^\d+$/.test(v) && Number(v) >= 5 && Number(v) <= 95 ? undefined : 'A whole number from 5 to 95'),
+    });
+    writeState(ctx.configDir, { ...readState(ctx.configDir), batteryFloor: Number(floor) });
     if (!ruleInstalled() || !ruleWorks()) {
-      ctx.log('Awake needs permission to turn sleep off. Enter your Mac password once:');
+      ctx.log('Awake needs your Mac password once, to allow turning sleep off. macOS asks for it next:');
       if (!installSudoers()) throw new Error('could not install the sleep permission rule');
     }
     if (!ensureWatchdog(ctx)) throw new Error('could not start the watchdog');
-    writeState(ctx.configDir, readState(ctx.configDir));
-    ctx.log('Awake is ready. Turn it on with: voidshift awake on');
+    ctx.log(`Ready. voidshift awake on keeps the Mac running until ${floor}% battery or voidshift awake off.`);
   },
 
   async uninstall(ctx) {

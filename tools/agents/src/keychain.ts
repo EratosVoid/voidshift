@@ -12,14 +12,6 @@ export function readLinearKey(): string | null {
 
 export const looksLikeLinearKey = (key: string) => KEY_SHAPE.test(key);
 
-// Reads a line from the terminal without echoing it.
-export function askHidden(prompt: string): string {
-  process.stdout.write(prompt);
-  const r = spawnSync('/bin/sh', ['-c', 'read -rs line; printf %s "$line"'], { stdio: ['inherit', 'pipe', 'inherit'], encoding: 'utf8' });
-  process.stdout.write('\n');
-  return (r.stdout ?? '').trim();
-}
-
 // Stores the key through `security -i` on stdin, so it never appears in a
 // process list. The shape check above rules out anything that could break
 // out of the command line.

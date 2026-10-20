@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 import { readFileSync } from 'node:fs';
 import { doctor } from './commands/doctor.ts';
+import { setup } from './commands/setup.ts';
 import { addTool, listTools, removeTool, runToolCommand } from './commands/tools.ts';
 import { findTool } from './registry.ts';
 
 const help = `voidshift: one CLI for the Void dev tools
 
 Usage
+  voidshift                   Set up: pick your tools and configure them
   voidshift doctor            Check this Mac is ready
   voidshift tools             List available tools
   voidshift add <tool>        Install and set up a tool
@@ -41,6 +43,11 @@ async function main(argv: string[]): Promise<number> {
       console.log(version());
       return 0;
     case undefined:
+      if (process.stdin.isTTY && process.stdout.isTTY) return setup();
+      console.log(help);
+      return 0;
+    case 'setup':
+      return setup();
     case '-h':
     case '--help':
     case 'help':

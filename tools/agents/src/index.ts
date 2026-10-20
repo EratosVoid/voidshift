@@ -4,11 +4,11 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { agentsDir, lookup, readAgentsConfig, writeAgentsConfig } from './config.ts';
-import { askHidden, looksLikeLinearKey, readLinearKey, storeLinearKey } from './keychain.ts';
+import { looksLikeLinearKey, readLinearKey, storeLinearKey } from './keychain.ts';
 import { runnerLoaded, startRunner, stopRunner } from './launchd.ts';
 import { createLinear } from './linear.ts';
 import { tick } from './runner.ts';
-import type { Check, Tool, ToolContext } from './types.ts';
+import type { Check, Tool, ToolContext, Ui } from './types.ts';
 
 const packDir = fileURLToPath(new URL('../pack/', import.meta.url));
 const packNames = () => readdirSync(packDir).filter((n) => existsSync(join(packDir, n, 'SKILL.md')));
@@ -28,26 +28,32 @@ function skillDirs(): { name: string; dir: string; present: boolean }[] {
 }
 
 // Asks for the key, checks it against Linear, and only then stores it.
-async function setupKey(log: (l: string) => void): Promise<boolean> {
-  log('The background runner needs a Linear personal API key (Linear > Settings > Security & access).');
-  const key = askHidden('Paste it here (hidden), then press Enter: ');
-  if (!looksLikeLinearKey(key)) {
-    log('That does not look like a Linear API key (it starts with lin_api_). Nothing was stored.');
-    return false;
-  }
+async function setupKey(ui: Ui): Promise<string | null> {
+  ui.info('Agents need a Linear personal API key (Linear > Settings > Security & access > API keys).');
+  const key = await ui.secret('Paste your Linear API key', (v) => (looksLikeLinearKey(v.trim()) ? undefined : 'Linear keys start with lin_api_'));
   try {
-    const me = await createLinear(key).viewer();
-    if (!storeLinearKey(key)) {
-      log('Linear accepted the key but the Keychain did not store it.');
-      return false;
+    const me = await createLinear(key.trim()).viewer();
+    if (!storeLinearKey(key.trim())) {
+      ui.warn('Linear accepted the key but the Keychain did not store it.');
+      return null;
     }
-    log(`Linear connected as ${me.name}. Key stored in your macOS Keychain.`);
-    return true;
+    ui.info(`Linear connected as ${me.name}. Key stored in your macOS Keychain.`);
+    return me.name;
   } catch (err) {
-    log(`Linear did not accept that key: ${(err as Error).message}. Nothing was stored.`);
-    return false;
+    ui.warn(`Linear did not accept that key: ${(err as Error).message}. Nothing was stored.`);
+    return null;
   }
 }
+
+async function currentLinearUser(): Promise<string | null> {
+  try {
+    return readLinearKey() ? (await linear().viewer()).name : null;
+  } catch {
+    return null;
+  }
+}
+
+const expandHome = (p: string) => (p.startsWith('~') ? join(homedir(), p.slice(1)) : p);
 
 const isOurLink = (path: string) => {
   try {
@@ -93,19 +99,59 @@ const agents: Tool = {
   summary: 'Agents for Claude Code and Codex that plan, build and QA Linear cards',
 
   async install(ctx) {
-    if (!skillDirs().some((t) => t.present)) throw new Error('install Claude Code or Codex first');
+    const { ui } = ctx;
+    const present = skillDirs().filter((t) => t.present);
+    if (!present.length) throw new Error('install Claude Code or Codex first');
+    const config = readAgentsConfig(ctx.configDir);
+
+    const engines = [...new Set(present.map((t) => (t.name === 'Codex' ? 'codex' : 'claude')))] as ('claude' | 'codex')[];
+    const engine =
+      engines.length === 1
+        ? engines[0]!
+        : await ui.select(
+            'Which agent CLI should run the background agents?',
+            [
+              { value: 'claude', label: 'Claude Code', hint: 'your Claude subscription' },
+              { value: 'codex', label: 'Codex', hint: 'your ChatGPT subscription' },
+            ],
+            config.engine,
+          );
+    if (engine !== config.engine) config.models = engine === 'codex' ? {} : { dev: 'opus', review: 'sonnet', ui: 'sonnet' };
+    config.engine = engine;
+
     linkPack(ctx.log);
-    let me: { name: string } | null = null;
-    try {
-      me = readLinearKey() ? await linear().viewer() : null;
-    } catch {
-      me = null;
+
+    const name = await currentLinearUser();
+    if (!name || !(await ui.confirm(`Keep using Linear as ${name}?`))) {
+      if (!(await setupKey(ui))) throw new Error('Linear is not connected. Run voidshift again to retry.');
     }
-    if (!me && !(await setupKey(ctx.log))) throw new Error('Linear is not connected. Run voidshift add agents again.');
-    if (me) ctx.log(`Linear connected as ${me.name}.`);
-    writeAgentsConfig(ctx.configDir, readAgentsConfig(ctx.configDir));
-    ctx.log('Next: voidshift agents repo <TEAM> <path>, then voidshift agents start');
-    ctx.log('Interactive agents (vs-plan, vs-publish) also need Linear connected inside Claude Code or Codex.');
+
+    const teams = await linear().teams();
+    let more = Object.keys(config.repos).length === 0 || (await ui.confirm('Add another repo for agents to build in?', false));
+    while (more) {
+      const cwd = process.cwd();
+      const path = expandHome(
+        await ui.text('Path to a repo agents should build in', {
+          initial: existsSync(join(cwd, '.git')) ? cwd : undefined,
+          placeholder: '~/code/my-app',
+          validate: (v) => (existsSync(join(expandHome(v.trim()), '.git')) ? undefined : 'Not a git repository'),
+        }),
+      ).trim();
+      const team = await ui.select(
+        'Cards from which Linear team build here?',
+        teams.map((t) => ({ value: t.key, label: `${t.key}  ${t.name}` })),
+      );
+      config.repos[team] = resolve(path);
+      ctx.log(`${team} cards build in ${resolve(path)}`);
+      more = await ui.confirm('Add another repo?', false);
+    }
+    writeAgentsConfig(ctx.configDir, config);
+
+    if (await ui.confirm('Start the background runner now? It checks Linear every minute for your cards labelled vs-plan.')) {
+      const ok = startRunner(ctx.home, [...ctx.selfCommand, 'agents', 'tick'], join(agentsDir(ctx.configDir), 'runner.log'));
+      ctx.log(ok ? 'Runner started.' : 'Could not start the runner. Try voidshift agents start.');
+    }
+    ctx.log('In Claude Code or Codex, connect Linear too, then use /vs-plan, /vs-plan-review and /vs-publish on a card.');
   },
 
   async uninstall(ctx) {
@@ -205,7 +251,7 @@ const agents: Tool = {
     },
 
     async key(_args, ctx) {
-      return (await setupKey(ctx.log)) ? 0 : 1;
+      return (await setupKey(ctx.ui)) ? 0 : 1;
     },
 
     async run(args, ctx) {

@@ -25,5 +25,8 @@
   "devDependencies": {
     "@types/node": "^22.18.0",
     "typescript": "^5.9.0"
+  },
+  "dependencies": {
+    "@clack/prompts": "^1.8.1"
   }
 }

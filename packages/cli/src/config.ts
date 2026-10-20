@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { ToolContext } from './tool.ts';
+import { ui } from './ui.ts';
 
 // ~/.config/voidshift, not ~/.voidshift: the older private daemon owns that.
 export function configDir(): string {
@@ -24,11 +25,13 @@ export function writeConfig(config: Config): void {
   writeFileSync(configPath(), JSON.stringify(config, null, 2) + '\n');
 }
 
-export function context(): ToolContext {
+// `quiet` routes tool output through the setup UI instead of plain lines.
+export function context(quiet = false): ToolContext {
   return {
     home: homedir(),
     configDir: configDir(),
     selfCommand: [process.execPath, realpathSync(process.argv[1] ?? '')],
-    log: (line) => console.log(line),
+    log: quiet ? (line) => ui.info(line) : (line) => console.log(line),
+    ui,
   };
 }

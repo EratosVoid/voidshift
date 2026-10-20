@@ -95,6 +95,11 @@ export function createLinear(apiKey: string) {
       return d.viewer;
     },
 
+    async teams(): Promise<{ key: string; name: string }[]> {
+      const d = await gql('teams', 'query { teams(first: 100) { nodes { key name } } }');
+      return d?.teams?.nodes ?? [];
+    },
+
     // My cards carrying the trigger label.
     async myCardsWithLabel(label: string): Promise<Card[]> {
       const d = await gql(
