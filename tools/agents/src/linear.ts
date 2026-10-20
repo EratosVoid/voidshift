@@ -41,12 +41,18 @@ function mapCard(n: any): Card {
 
 export function createLinear(apiKey: string) {
   async function gql(operation: string, query: string, variables: Record<string, unknown> = {}): Promise<any> {
-    const res = await fetch(ENDPOINT, {
-      method: 'POST',
-      signal: AbortSignal.timeout(30_000),
-      headers: { Authorization: apiKey, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query, variables }),
-    });
+    let res: Response;
+    try {
+      res = await fetch(ENDPOINT, {
+        method: 'POST',
+        signal: AbortSignal.timeout(30_000),
+        headers: { Authorization: apiKey, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query, variables }),
+      });
+    } catch (err) {
+      const cause = (err as { cause?: { code?: string; message?: string } }).cause;
+      throw new Error(`could not reach Linear (${cause?.code ?? cause?.message ?? (err as Error).message})`);
+    }
     const text = await res.text();
     let json: any = null;
     try {

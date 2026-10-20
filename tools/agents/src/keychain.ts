@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { userInfo } from 'node:os';
 
 const SERVICE = 'voidshift-linear';
+const KEY_SHAPE = /^lin_api_[A-Za-z0-9]+$/;
 
 export function readLinearKey(): string | null {
   const r = spawnSync('/usr/bin/security', ['find-generic-password', '-s', SERVICE, '-w'], { encoding: 'utf8' });
@@ -9,10 +10,21 @@ export function readLinearKey(): string | null {
   return key || null;
 }
 
-// Interactive: `security` prompts for the key so it never touches argv or a file.
-export function promptLinearKey(): boolean {
-  const r = spawnSync('/usr/bin/security', ['add-generic-password', '-U', '-s', SERVICE, '-a', userInfo().username, '-w'], {
-    stdio: 'inherit',
-  });
-  return r.status === 0;
+export const looksLikeLinearKey = (key: string) => KEY_SHAPE.test(key);
+
+// Reads a line from the terminal without echoing it.
+export function askHidden(prompt: string): string {
+  process.stdout.write(prompt);
+  const r = spawnSync('/bin/sh', ['-c', 'read -rs line; printf %s "$line"'], { stdio: ['inherit', 'pipe', 'inherit'], encoding: 'utf8' });
+  process.stdout.write('\n');
+  return (r.stdout ?? '').trim();
+}
+
+// Stores the key through `security -i` on stdin, so it never appears in a
+// process list. The shape check above rules out anything that could break
+// out of the command line.
+export function storeLinearKey(key: string): boolean {
+  if (!looksLikeLinearKey(key)) return false;
+  const command = `add-generic-password -U -s ${SERVICE} -a ${userInfo().username} -w ${key}\n`;
+  return spawnSync('/usr/bin/security', ['-i'], { input: command, encoding: 'utf8' }).status === 0;
 }

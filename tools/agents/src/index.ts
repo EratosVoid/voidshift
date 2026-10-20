@@ -4,7 +4,7 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { agentsDir, lookup, readAgentsConfig, writeAgentsConfig } from './config.ts';
-import { promptLinearKey, readLinearKey } from './keychain.ts';
+import { askHidden, looksLikeLinearKey, readLinearKey, storeLinearKey } from './keychain.ts';
 import { runnerLoaded, startRunner, stopRunner } from './launchd.ts';
 import { createLinear } from './linear.ts';
 import { tick } from './runner.ts';
@@ -13,15 +13,40 @@ import type { Check, Tool, ToolContext } from './types.ts';
 const packDir = fileURLToPath(new URL('../pack/', import.meta.url));
 const packNames = () => readdirSync(packDir).filter((n) => existsSync(join(packDir, n, 'SKILL.md')));
 
-// Where each agent CLI looks for user-level skills.
+// Where each agent CLI looks for user-level skills. Claude Code reads
+// CLAUDE_CONFIG_DIR when set and ~/.claude otherwise, and people switch
+// between the two, so both get the agents.
 function skillDirs(): { name: string; dir: string; present: boolean }[] {
-  const claudeHome = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude');
-  const codexHome = process.env.CODEX_HOME ?? join(homedir(), '.codex');
   const has = (cmd: string) => spawnSync(cmd, ['--version'], { encoding: 'utf8' }).status === 0;
+  const claude = has('claude');
+  const claudeHomes = [...new Set([process.env.CLAUDE_CONFIG_DIR, join(homedir(), '.claude')].filter((d): d is string => !!d))];
+  const codexHome = process.env.CODEX_HOME ?? join(homedir(), '.codex');
   return [
-    { name: 'Claude Code', dir: join(claudeHome, 'skills'), present: has('claude') },
+    ...claudeHomes.map((h) => ({ name: `Claude Code`, dir: join(h, 'skills'), present: claude })),
     { name: 'Codex', dir: join(codexHome, 'skills'), present: has('codex') },
   ];
+}
+
+// Asks for the key, checks it against Linear, and only then stores it.
+async function setupKey(log: (l: string) => void): Promise<boolean> {
+  log('The background runner needs a Linear personal API key (Linear > Settings > Security & access).');
+  const key = askHidden('Paste it here (hidden), then press Enter: ');
+  if (!looksLikeLinearKey(key)) {
+    log('That does not look like a Linear API key (it starts with lin_api_). Nothing was stored.');
+    return false;
+  }
+  try {
+    const me = await createLinear(key).viewer();
+    if (!storeLinearKey(key)) {
+      log('Linear accepted the key but the Keychain did not store it.');
+      return false;
+    }
+    log(`Linear connected as ${me.name}. Key stored in your macOS Keychain.`);
+    return true;
+  } catch (err) {
+    log(`Linear did not accept that key: ${(err as Error).message}. Nothing was stored.`);
+    return false;
+  }
 }
 
 const isOurLink = (path: string) => {
@@ -70,14 +95,15 @@ const agents: Tool = {
   async install(ctx) {
     if (!skillDirs().some((t) => t.present)) throw new Error('install Claude Code or Codex first');
     linkPack(ctx.log);
-    if (!readLinearKey()) {
-      ctx.log('The background runner needs a Linear personal API key (Linear > Settings > Security & access).');
-      ctx.log('Paste it when asked; it goes into your macOS Keychain:');
-      if (!promptLinearKey()) throw new Error('could not store the Linear key');
+    let me: { name: string } | null = null;
+    try {
+      me = readLinearKey() ? await linear().viewer() : null;
+    } catch {
+      me = null;
     }
-    const me = await linear().viewer();
+    if (!me && !(await setupKey(ctx.log))) throw new Error('Linear is not connected. Run voidshift add agents again.');
+    if (me) ctx.log(`Linear connected as ${me.name}.`);
     writeAgentsConfig(ctx.configDir, readAgentsConfig(ctx.configDir));
-    ctx.log(`Linear connected as ${me.name}.`);
     ctx.log('Next: voidshift agents repo <TEAM> <path>, then voidshift agents start');
     ctx.log('Interactive agents (vs-plan, vs-publish) also need Linear connected inside Claude Code or Codex.');
   },
@@ -97,8 +123,8 @@ const agents: Tool = {
       const missing = packNames().filter((n) => !isOurLink(join(t.dir, n)));
       checks.push(
         missing.length === 0
-          ? { name: `agents in ${t.name}`, status: 'ok', detail: `${packNames().length} linked` }
-          : { name: `agents in ${t.name}`, status: 'warn', detail: `missing ${missing.join(', ')}`, fix: 'voidshift add agents' },
+          ? { name: `agents in ${t.name} (${t.dir.replace(homedir(), "~")})`, status: 'ok', detail: `${packNames().length} linked` }
+          : { name: `agents in ${t.name} (${t.dir.replace(homedir(), "~")})`, status: 'warn', detail: `missing ${missing.join(', ')}`, fix: 'voidshift add agents' },
       );
     }
     try {
@@ -179,8 +205,7 @@ const agents: Tool = {
     },
 
     async key(_args, ctx) {
-      ctx.log('Paste your Linear personal API key:');
-      return promptLinearKey() ? 0 : 1;
+      return (await setupKey(ctx.log)) ? 0 : 1;
     },
 
     async run(args, ctx) {
