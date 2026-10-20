@@ -66,7 +66,7 @@ async function on(args: string[], ctx: ToolContext): Promise<number> {
 
 async function off(_args: string[], ctx: ToolContext): Promise<number> {
   const ok = setSleepDisabled(false);
-  writeState(ctx.configDir, { ...readState(ctx.configDir), managed: false, lastReason: 'turned off' });
+  writeState(ctx.configDir, { ...readState(ctx.configDir), managed: false, lastReason: 'you turned it off' });
   ctx.log(ok ? 'Sleep restored.' : 'Could not restore sleep. Run: sudo pmset -a disablesleep 0');
   return ok ? 0 : 1;
 }
