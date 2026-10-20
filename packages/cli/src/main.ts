@@ -1,15 +1,23 @@
 #!/usr/bin/env node
 import { readFileSync } from 'node:fs';
 import { doctor } from './commands/doctor.ts';
-import { addTool, listTools } from './commands/tools.ts';
+import { addTool, listTools, removeTool, runToolCommand } from './commands/tools.ts';
+import { findTool } from './registry.ts';
 
 const help = `voidshift: one CLI for the Void dev tools
 
 Usage
-  voidshift doctor         Check this Mac is ready
-  voidshift tools          List available tools
-  voidshift add <tool>     Install and set up a tool
-  voidshift --version      Print the version
+  voidshift doctor            Check this Mac is ready
+  voidshift tools             List available tools
+  voidshift add <tool>        Install and set up a tool
+  voidshift remove <tool>     Take a tool down and uninstall it
+  voidshift <tool> <command>  Run a tool, e.g. voidshift awake on
+  voidshift --version         Print the version
+
+Awake
+  voidshift awake on [--until 7am | --for 6h] [--battery 20]
+  voidshift awake off
+  voidshift awake status
 `;
 
 function version(): string {
@@ -17,7 +25,7 @@ function version(): string {
   return pkg.version;
 }
 
-function main(argv: string[]): number {
+async function main(argv: string[]): Promise<number> {
   const [cmd, ...rest] = argv;
   switch (cmd) {
     case 'doctor':
@@ -26,6 +34,8 @@ function main(argv: string[]): number {
       return listTools();
     case 'add':
       return addTool(rest[0]);
+    case 'remove':
+      return removeTool(rest[0]);
     case '-v':
     case '--version':
       console.log(version());
@@ -36,10 +46,11 @@ function main(argv: string[]): number {
     case 'help':
       console.log(help);
       return 0;
-    default:
-      console.error(`unknown command: ${cmd}\n\n${help}`);
-      return 2;
   }
+  const tool = findTool(cmd);
+  if (tool) return runToolCommand(tool, rest);
+  console.error(`unknown command: ${cmd}\n\n${help}`);
+  return 2;
 }
 
-process.exitCode = main(process.argv.slice(2));
+process.exitCode = await main(process.argv.slice(2));

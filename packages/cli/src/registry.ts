@@ -14,7 +14,7 @@ export const registry: ToolEntry[] = [
     name: 'awake',
     summary: 'Keep the Mac running on battery with the lid closed, with guardrails',
     pkg: '@devvoid/voidshift-awake',
-    status: 'planned',
+    status: 'available',
   },
   {
     name: 'skills',

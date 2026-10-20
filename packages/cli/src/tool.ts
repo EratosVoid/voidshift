@@ -1,6 +1,6 @@
 // The contract every voidshift tool implements. The CLI owns discovery,
 // install and reporting; a tool only knows how to set itself up, take
-// itself down and say whether it is healthy.
+// itself down, say whether it is healthy, and run its own subcommands.
 
 export type CheckStatus = 'ok' | 'warn' | 'fail';
 
@@ -14,8 +14,12 @@ export interface Check {
 export interface ToolContext {
   home: string;
   configDir: string;
+  // How to invoke this CLI again, e.g. from a launchd job.
+  selfCommand: string[];
   log: (line: string) => void;
 }
+
+export type ToolCommand = (args: string[], ctx: ToolContext) => Promise<number>;
 
 export interface Tool {
   name: string;
@@ -23,4 +27,5 @@ export interface Tool {
   install(ctx: ToolContext): Promise<void>;
   uninstall(ctx: ToolContext): Promise<void>;
   checks(ctx: ToolContext): Promise<Check[]>;
+  commands?: Record<string, ToolCommand>;
 }
