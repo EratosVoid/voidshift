@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import { BUILT_IN_CHAINS, describeChain, hasWork, migrate } from '../src/config.ts';
 
 test('built-in chains', () => {
-  assert.equal(describeChain(BUILT_IN_CHAINS.build!), 'Dev → CI → Code review');
+  assert.equal(describeChain(BUILT_IN_CHAINS.build!), 'Dev → QA');
   assert.ok(hasWork(BUILT_IN_CHAINS.build!));
-  assert.ok(!hasWork(BUILT_IN_CHAINS['review-only']!));
+  assert.ok(!hasWork(BUILT_IN_CHAINS['qa-only']!));
 });
 
 test('old team-to-repo configs become projects and build triggers', () => {
@@ -15,7 +15,13 @@ test('old team-to-repo configs become projects and build triggers', () => {
   assert.equal((m as Record<string, unknown>).repos, undefined);
 });
 
-test('new configs pass through untouched', () => {
-  const c = { triggers: [], projects: {} };
-  assert.equal(migrate(c), c);
+test('new configs pass through', () => {
+  assert.deepEqual(migrate({ triggers: [], projects: {} }), { triggers: [], projects: {} });
+});
+
+test('old CI and code review steps fold into QA', () => {
+  const m = migrate({ chains: { mine: { steps: ['vs-dev', 'ci', 'vs-qa-review', 'vs-qa-ui'], maxRounds: 2 } }, triggers: [{ chain: 'review-only' }], enabled: ['vs-dev', 'vs-qa-review', 'vs-qa-ui'] });
+  assert.deepEqual(m.chains, { mine: { steps: ['vs-dev', 'vs-qa'], maxRounds: 2 } });
+  assert.equal(m.triggers?.[0]?.chain, 'qa-only');
+  assert.deepEqual(m.enabled, ['vs-dev', 'vs-qa']);
 });

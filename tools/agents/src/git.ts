@@ -82,3 +82,9 @@ export function waitForChecks(worktree: string, branch: string, timeoutMs = 30 *
     });
   });
 }
+
+// QA runs with write access so it can start the app; nothing it changes stays.
+export function resetWorktree(worktree: string): void {
+  sh('git', ['reset', '--hard', 'HEAD'], worktree);
+  sh('git', ['clean', '-fd'], worktree);
+}

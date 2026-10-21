@@ -18,7 +18,7 @@ import {
 } from './chain.ts';
 import { STEPS, agentsDir, allChains, hasWork, isProducer, type AgentsConfig, type Chain, type Project, type StepId, type Trigger } from './config.ts';
 import { runAgent } from './engine.ts';
-import { commitsAhead, defaultBranch, ensureDraftPr, ensureWorktree, markReady, push, waitForChecks } from './git.ts';
+import { commitsAhead, defaultBranch, ensureDraftPr, ensureWorktree, markReady, push, resetWorktree, waitForChecks } from './git.ts';
 import type { Card, Linear } from './linear.ts';
 
 const packDir = fileURLToPath(new URL('../pack/', import.meta.url));
@@ -92,17 +92,21 @@ export async function runCard(card: Card, trigger: Trigger, chain: Chain, projec
 
     async function check(step: StepId): Promise<StepResult> {
       const label = STEPS[step].label;
-      if (step === 'ci') {
-        if (!prUrl) return { step: label, verdict: 'SKIP', report: 'No pull request yet.' };
-        return { step: label, ...(await waitForChecks(worktree, card.branchName)) };
+      let ciNote = '';
+      if (step === 'vs-qa') {
+        if (commitsAhead(worktree, base) === 0) return { step: label, verdict: 'SKIP', report: 'No changes on the branch yet.' };
+        // CI first, without an agent: a red build goes straight back.
+        if (prUrl) {
+          const ci = await waitForChecks(worktree, card.branchName);
+          if (ci.verdict === 'FIX') return { step: label, verdict: 'FIX', report: ci.report };
+          ciNote = ci.verdict === 'SHIP' ? '# CI\n\nCI passed on this branch.' : '# CI\n\nThis repo has no CI checks.';
+        }
       }
-      if (step === 'vs-qa-ui' && !project.uiUrl) return { step: label, verdict: 'SKIP', report: 'No app URL set for this project.' };
-      if (step === 'vs-qa-review' && commitsAhead(worktree, base) === 0) return { step: label, verdict: 'SKIP', report: 'No changes on the branch yet.' };
-      const extra = step === 'vs-qa-ui' ? `# Where\n\nApp URL: ${project.uiUrl}\nEvidence folder: ${runDir}\n\n${UNATTENDED}` : UNATTENDED;
       const r = await runAgent({
-        engine: config.engine, model: config.models.review, cwd: worktree, write: false, logFile: logFile(step),
-        prompt: buildPrompt({ skill: skill(step), card, plan: planText(), base, round: runs.qa + 1, extra }),
+        engine: config.engine, model: config.models.review, cwd: worktree, write: step === 'vs-qa', logFile: logFile(step),
+        prompt: buildPrompt({ skill: skill(step), card, plan: planText(), base, round: runs.qa + 1, extra: [ciNote, UNATTENDED].filter(Boolean).join('\n\n') }),
       });
+      if (step === 'vs-qa') resetWorktree(worktree);
       return { step: label, verdict: parseVerdict(r.output), report: r.output };
     }
 

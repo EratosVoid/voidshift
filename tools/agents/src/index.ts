@@ -118,8 +118,15 @@ function syncLinks(chosen: Home[], all: Home[], enabled: string[], log: (l: stri
   for (const home of all) {
     const skills = join(home.dir, 'skills');
     const wanted = chosen.some((h) => h.dir === home.dir);
-    for (const name of packNames()) {
-      if ((!wanted || !enabled.includes(name)) && isOurLink(join(skills, name))) rmSync(join(skills, name));
+    let existing: string[] = [];
+    try {
+      existing = readdirSync(skills);
+    } catch {
+      // no skills folder yet
+    }
+    for (const name of existing) {
+      const stale = !packNames().includes(name) || !wanted || !enabled.includes(name);
+      if (stale && isOurLink(join(skills, name))) rmSync(join(skills, name));
     }
     if (!wanted) continue;
     mkdirSync(skills, { recursive: true });
@@ -173,7 +180,7 @@ async function setupChains(ui: Ui, config: AgentsConfig, log: (l: string) => voi
   log(
     [
       'A chain is the agents that run, in order, when a card is handed over.',
-      'Steps run in order. When a check (Plan review, CI, Code review) finds',
+      'Steps run in order. When a check (Plan review or QA) finds',
       'problems, the work goes back to the step that made it, Plan or Dev, with',
       'the findings, until the checks pass or the limit parks the card for you.',
     ].join('\n'),
@@ -191,7 +198,7 @@ async function setupChains(ui: Ui, config: AgentsConfig, log: (l: string) => voi
         steps.length ? `So far: ${steps.map((s) => STEPS[s].label).join(' → ')}. Add a step:` : 'First step:',
         [
           ...(Object.keys(STEPS) as StepId[])
-            .filter((id) => !STEPS[id].hidden && stepEnabled(id, config.enabled))
+            .filter((id) => stepEnabled(id, config.enabled))
             .map((id) => ({ value: id, label: STEPS[id].label, hint: STEPS[id].hint })),
           ...(steps.length ? [{ value: DONE as typeof DONE, label: 'Done' }] : []),
         ],
@@ -220,7 +227,7 @@ async function setupTriggers(ui: Ui, config: AgentsConfig, teams: { key: string;
     const chains = allChains(config);
     const usableChains = Object.keys(chains).filter((n) => chains[n]!.steps.every((st) => stepEnabled(st, config.enabled)));
     if (!usableChains.length) {
-      log('No chain can run with the agents you enabled. Enable Dev or Code review, or build a chain.');
+      log('No chain can run with the agents you enabled. Enable Dev or QA, or build a chain.');
       return;
     }
     const chain = await ui.select('Chain to run', usableChains.map((n) => ({ value: n, label: n, hint: describeChain(chains[n]!) })), usableChains.includes('build') ? 'build' : usableChains[0]);
