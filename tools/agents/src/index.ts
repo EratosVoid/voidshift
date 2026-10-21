@@ -3,7 +3,7 @@ import { existsSync, lstatSync, mkdirSync, readdirSync, readlinkSync, rmSync, sy
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { STEPS, agentsDir, allChains, describeChain, readAgentsConfig, writeAgentsConfig, type AgentsConfig, type StepId } from './config.ts';
+import { AGENTS, STEPS, agentsDir, allChains, describeChain, stepEnabled, visibleAgents, readAgentsConfig, writeAgentsConfig, type AgentsConfig, type StepId } from './config.ts';
 import { looksLikeLinearKey, readLinearKey, storeLinearKey } from './keychain.ts';
 import { runnerLoaded, startRunner, stopRunner } from './launchd.ts';
 import { createLinear } from './linear.ts';
@@ -114,16 +114,16 @@ const isOurLink = (path: string) => {
 };
 
 // Links every agent into each chosen home and removes our links from the rest.
-function syncLinks(chosen: Home[], all: Home[], log: (l: string) => void): void {
+function syncLinks(chosen: Home[], all: Home[], enabled: string[], log: (l: string) => void): void {
   for (const home of all) {
     const skills = join(home.dir, 'skills');
     const wanted = chosen.some((h) => h.dir === home.dir);
-    if (!wanted) {
-      for (const name of packNames()) if (isOurLink(join(skills, name))) rmSync(join(skills, name));
-      continue;
-    }
-    mkdirSync(skills, { recursive: true });
     for (const name of packNames()) {
+      if ((!wanted || !enabled.includes(name)) && isOurLink(join(skills, name))) rmSync(join(skills, name));
+    }
+    if (!wanted) continue;
+    mkdirSync(skills, { recursive: true });
+    for (const name of packNames().filter((n) => enabled.includes(n))) {
       const dest = join(skills, name);
       if (isOurLink(dest)) continue;
       if (existsSync(dest)) {
@@ -170,8 +170,19 @@ async function setupProjects(ui: Ui, config: AgentsConfig, log: (l: string) => v
 
 // Chains are agents in order. VoidShift ships some; custom ones are built here.
 async function setupChains(ui: Ui, config: AgentsConfig, log: (l: string) => void): Promise<void> {
-  for (const [name, chain] of Object.entries(allChains(config))) log(`Chain ${name}: ${describeChain(chain)}`);
-  while (await ui.confirm('Build a new chain?', false)) {
+  log(
+    [
+      'A chain is the agents that run, in order, when a card is handed over.',
+      'Each round runs every step. If a check (CI or Code review) finds problems,',
+      'the next round sends them back to Dev, until the checks pass or the round',
+      'limit parks the card for you to look at.',
+    ].join('\n'),
+  );
+  const usable = (steps: StepId[]) => steps.every((s) => stepEnabled(s, config.enabled));
+  for (const [name, chain] of Object.entries(allChains(config))) {
+    log(`Chain ${name}: ${describeChain(chain)}${usable(chain.steps) ? '' : '  (needs an agent you did not enable)'}`);
+  }
+  while (await ui.confirm('Build your own chain?', false)) {
     const name = (await ui.text('Name for the chain', { placeholder: 'build-fast', validate: (v) => (v.trim() && !allChains(config)[v.trim()] ? undefined : 'Pick a new name') })).trim();
     const steps: StepId[] = [];
     for (;;) {
@@ -179,7 +190,9 @@ async function setupChains(ui: Ui, config: AgentsConfig, log: (l: string) => voi
       const pick = await ui.select<StepId | typeof DONE>(
         steps.length ? `So far: ${steps.map((s) => STEPS[s].label).join(' → ')}. Add a step:` : 'First step:',
         [
-          ...(Object.keys(STEPS) as StepId[]).filter((id) => !STEPS[id].hidden).map((id) => ({ value: id, label: STEPS[id].label, hint: STEPS[id].hint })),
+          ...(Object.keys(STEPS) as StepId[])
+            .filter((id) => !STEPS[id].hidden && stepEnabled(id, config.enabled))
+            .map((id) => ({ value: id, label: STEPS[id].label, hint: STEPS[id].hint })),
           ...(steps.length ? [{ value: DONE as typeof DONE, label: 'Done' }] : []),
         ],
       );
@@ -206,7 +219,12 @@ async function setupTriggers(ui: Ui, config: AgentsConfig, teams: { key: string;
     const team = await ui.select('Linear team', teams.map((t) => ({ value: t.key, label: `${t.key}  ${t.name}` })));
     const label = (await ui.text('Label that starts it', { initial: 'vs-plan', validate: (v) => (v.trim() ? undefined : 'Required') })).trim();
     const chains = allChains(config);
-    const chain = await ui.select('Chain to run', Object.keys(chains).map((n) => ({ value: n, label: n, hint: describeChain(chains[n]!) })), 'build');
+    const usableChains = Object.keys(chains).filter((n) => chains[n]!.steps.every((st) => stepEnabled(st, config.enabled)));
+    if (!usableChains.length) {
+      log('No chain can run with the agents you enabled. Enable Dev or Code review, or build a chain.');
+      return;
+    }
+    const chain = await ui.select('Chain to run', usableChains.map((n) => ({ value: n, label: n, hint: describeChain(chains[n]!) })), usableChains.includes('build') ? 'build' : usableChains[0]);
     const project = projects.length === 1 ? projects[0]! : await ui.select('In which project?', projects.map((n) => ({ value: n, label: n, hint: tilde(config.projects[n]!.path) })));
     config.triggers = config.triggers.filter((t) => !(t.team === team && t.label === label));
     config.triggers.push({ source: 'linear', team, label, chain, project });
@@ -232,8 +250,15 @@ const agents: Tool = {
 
     const homes = await chooseHomes(ui, config.homes);
     if (!homes.length) throw new Error('pick at least one folder to install the agents into');
-    syncLinks(homes, candidateHomes([...config.homes, ...homes]), ctx.log);
+    const enabled = await ui.multiselect(
+      'Which agents do you want?',
+      visibleAgents().map((a) => ({ value: a, label: AGENTS[a]!.label, hint: AGENTS[a]!.hint })),
+      config.enabled.length ? config.enabled.filter((a) => visibleAgents().includes(a)) : visibleAgents(),
+    );
+    if (!enabled.length) throw new Error('pick at least one agent');
+    syncLinks(homes, candidateHomes([...config.homes, ...homes]), enabled, ctx.log);
     config.homes = homes;
+    config.enabled = enabled;
 
     const engines = [...new Set(homes.map((h) => h.kind))];
     const engine =
@@ -255,8 +280,8 @@ const agents: Tool = {
       if (!(await setupKey(ui))) throw new Error('Linear is not connected. Run voidshift again to retry.');
     }
 
-    await setupProjects(ui, config, ctx.log);
     await setupChains(ui, config, ctx.log);
+    await setupProjects(ui, config, ctx.log);
     await setupTriggers(ui, config, await linear().teams(), ctx.log);
     writeAgentsConfig(ctx.configDir, config);
 
@@ -269,19 +294,21 @@ const agents: Tool = {
 
   async uninstall(ctx) {
     stopRunner(ctx.home);
-    syncLinks([], candidateHomes(readAgentsConfig(ctx.configDir).homes), ctx.log);
+    syncLinks([], candidateHomes(readAgentsConfig(ctx.configDir).homes), [], ctx.log);
     ctx.log('Agents unlinked and the runner stopped. Config and the Linear key were kept.');
   },
 
   async checks(ctx): Promise<Check[]> {
     const checks: Check[] = [];
-    const homes = readAgentsConfig(ctx.configDir).homes;
+    const saved = readAgentsConfig(ctx.configDir);
+    const homes = saved.homes;
+    const wanted = packNames().filter((n) => !saved.enabled.length || saved.enabled.includes(n));
     if (!homes.length) checks.push({ name: 'agents installed', status: 'warn', detail: 'in no Claude Code or Codex folder', fix: 'voidshift' });
     for (const h of homes) {
-      const missing = packNames().filter((n) => !isOurLink(join(h.dir, 'skills', n)));
+      const missing = wanted.filter((n) => !isOurLink(join(h.dir, 'skills', n)));
       checks.push(
         missing.length === 0
-          ? { name: `agents in ${homeLabel(h)}`, status: 'ok', detail: `${packNames().length} linked` }
+          ? { name: `agents in ${homeLabel(h)}`, status: 'ok', detail: `${wanted.length} linked` }
           : { name: `agents in ${homeLabel(h)}`, status: 'warn', detail: `missing ${missing.join(', ')}`, fix: 'voidshift' },
       );
     }

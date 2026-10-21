@@ -13,6 +13,21 @@ export const STEPS: Record<StepId, { label: string; kind: 'work' | 'check'; hint
   'vs-qa-ui': { label: 'Browser check', kind: 'check', hint: "clicks through the app at the project's URL", hidden: true },
 };
 
+// The agents in the pack, as setup describes them.
+export const AGENTS: Record<string, { label: string; hint: string; hidden?: boolean }> = {
+  'vs-plan': { label: 'Plan', hint: 'you run it: plans a card against the code' },
+  'vs-plan-review': { label: 'Plan review', hint: 'you run it: checks a plan before it is published' },
+  'vs-publish': { label: 'Publish', hint: 'you run it: posts the plan to Linear and hands the card to a chain' },
+  'vs-dev': { label: 'Dev', hint: 'in chains: implements the plan and opens a draft PR' },
+  'vs-qa-review': { label: 'Code review', hint: 'in chains: reviews the change against the card and plan' },
+  'vs-qa-ui': { label: 'Browser check', hint: 'in chains: clicks through the app', hidden: true },
+};
+
+export const visibleAgents = () => Object.keys(AGENTS).filter((a) => !AGENTS[a]!.hidden);
+
+// CI is built into the runner, so it never needs enabling.
+export const stepEnabled = (step: StepId, enabled: string[]) => step === 'ci' || enabled.includes(step);
+
 export interface Chain {
   steps: StepId[];
   // How many times a failed check sends the work back before parking.
@@ -44,6 +59,8 @@ export interface AgentsConfig {
   reviewState: string;
   // Config folders the agents are linked into, e.g. ~/.claude or ~/.codex.
   homes: { kind: 'claude' | 'codex'; dir: string }[];
+  // Agents switched on; empty until setup has asked.
+  enabled: string[];
 }
 
 // Shipped with VoidShift; custom chains sit beside them.
@@ -60,6 +77,7 @@ export const DEFAULTS: AgentsConfig = {
   triggers: [],
   reviewState: 'In Review',
   homes: [],
+  enabled: [],
 };
 
 export const agentsDir = (configDir: string) => join(configDir, 'agents');
