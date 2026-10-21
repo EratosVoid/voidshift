@@ -32,29 +32,46 @@ function candidateHomes(saved: Home[]): Home[] {
   return all.filter((h, i) => all.findIndex((o) => o.dir === h.dir) === i);
 }
 
-// Before a choice is saved, tick only the folder Claude Code is using right
-// now (or Codex when Claude is not installed). More is one keypress away.
-function defaultHomes(candidates: Home[]): Home[] {
-  const first = candidates.find((h) => h.kind === 'claude') ?? candidates.find((h) => h.kind === 'codex');
-  return first ? [first] : [];
-}
+const kindLabel = (k: Home['kind']) => (k === 'claude' ? 'Claude Code' : 'Codex');
 
+// First which agent CLIs, then where each one keeps its config. Codex has one
+// home, so it only asks about Claude Code, which people often run from
+// several config folders.
 async function chooseHomes(ui: Ui, saved: Home[]): Promise<Home[]> {
   const candidates = candidateHomes(saved);
-  const initial = (saved.length ? saved : defaultHomes(candidates)).map((h) => h.dir);
-  const OTHER = '__other__';
-  const picked = await ui.multiselect(
-    'Install the agents into which Claude Code / Codex folders?',
-    [...candidates.map((h) => ({ value: h.dir, label: homeLabel(h) })), { value: OTHER, label: 'Another Claude Code folder...' }],
-    initial,
-  );
-  const homes = candidates.filter((h) => picked.includes(h.dir));
-  if (picked.includes(OTHER)) {
-    const dir = await ui.text('Path to the Claude Code config folder (the one with settings.json)', {
-      placeholder: '~/work/claude',
-      validate: (v) => (existsSync(expandHome(v.trim())) ? undefined : 'That folder does not exist'),
-    });
-    homes.push({ kind: 'claude', dir: resolve(expandHome(dir.trim())) });
+  const kinds = (['claude', 'codex'] as const).filter((k) => candidates.some((h) => h.kind === k));
+  const savedKinds = [...new Set(saved.map((h) => h.kind))];
+  const picked =
+    kinds.length === 1
+      ? [...kinds]
+      : await ui.multiselect<Home['kind']>(
+          'Which do you use?',
+          kinds.map((k) => ({ value: k, label: kindLabel(k) })),
+          savedKinds.length ? savedKinds : ['claude'],
+        );
+
+  const homes: Home[] = [];
+  for (const kind of picked) {
+    const options = candidates.filter((h) => h.kind === kind);
+    if (kind === 'codex') {
+      homes.push(...options.slice(0, 1));
+      continue;
+    }
+    const savedDirs = saved.filter((h) => h.kind === kind).map((h) => h.dir);
+    const OTHER = '__other__';
+    const dirs = await ui.multiselect(
+      'Where is your Claude Code config? Pick every folder you use.',
+      [...options.map((h) => ({ value: h.dir, label: tilde(h.dir) })), { value: OTHER, label: 'Another folder...' }],
+      savedDirs.length ? savedDirs : options.slice(0, 1).map((h) => h.dir),
+    );
+    homes.push(...options.filter((h) => dirs.includes(h.dir)));
+    if (dirs.includes(OTHER)) {
+      const dir = await ui.text('Path to the Claude Code config folder (the one with settings.json)', {
+        placeholder: '~/work/claude',
+        validate: (v) => (existsSync(expandHome(v.trim())) ? undefined : 'That folder does not exist'),
+      });
+      homes.push({ kind: 'claude', dir: resolve(expandHome(dir.trim())) });
+    }
   }
   return homes;
 }
