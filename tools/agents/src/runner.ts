@@ -3,16 +3,20 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   LABELS,
+  PLAN_HEADING,
   buildPrompt,
   findingsFor,
+  fixTarget,
   isRoundLabel,
   latestPlan,
   parseDevResult,
   parseVerdict,
+  planBody,
   qaPassed,
+  verdictBlock,
   type StepResult,
 } from './chain.ts';
-import { STEPS, agentsDir, allChains, hasWork, type AgentsConfig, type Chain, type Project, type Trigger } from './config.ts';
+import { STEPS, agentsDir, allChains, hasWork, isProducer, type AgentsConfig, type Chain, type Project, type StepId, type Trigger } from './config.ts';
 import { runAgent } from './engine.ts';
 import { commitsAhead, defaultBranch, ensureDraftPr, ensureWorktree, markReady, push, waitForChecks } from './git.ts';
 import type { Card, Linear } from './linear.ts';
@@ -37,15 +41,25 @@ function withLabels(card: Card, drop: (l: string) => boolean, add: string[]): st
 const statusLabel = (l: string) =>
   l === LABELS.working || l === LABELS.verified || l === LABELS.parked || l === LABELS.changes || isRoundLabel(l);
 
-// One card through a trigger's chain. Every round runs the steps in order;
-// a failed check starts the next round with the findings, so the work step
-// fixes them, until the checks pass or the round cap parks the card.
+const UNATTENDED = `# Running unattended
+
+You are one step in a VoidShift chain. Nobody can answer questions and the
+Linear connection is not available: the card and any plan are included above.
+Do not write plan files; return your output as your final message. Make the
+call the code supports and state it.`;
+
+const isVerdict = (s: StepId) => STEPS[s].output === 'verdict';
+
+// One card through a trigger's chain. Steps run in order. A failed check (or a
+// run of consecutive checks) sends its findings back to the nearest earlier
+// step that produces something, Plan or Dev, and the chain continues from
+// there, until everything passes or the loop cap parks the card.
 export async function runCard(card: Card, trigger: Trigger, chain: Chain, project: Project, rc: RunContext): Promise<'verified' | 'changes' | 'parked'> {
   const { linear, config, log } = rc;
   const runDir = join(agentsDir(rc.configDir), 'runs', card.identifier, stamp());
   mkdirSync(runDir, { recursive: true });
   const say = (line: string) => log(`${card.identifier} ${line}`);
-  const work = hasWork(chain);
+  const steps = chain.steps;
 
   async function park(reason: string): Promise<'parked'> {
     say(`parked: ${reason}`);
@@ -56,82 +70,111 @@ export async function runCard(card: Card, trigger: Trigger, chain: Chain, projec
 
   try {
     if (!existsSync(join(project.path, '.git'))) throw new Park(`The project folder ${project.path} is not a git repository on this Mac.`);
-    const plan = latestPlan(await linear.comments(card.identifier));
-    if (work && !plan) throw new Park('No comment starting with "## VoidShift plan" was found. Publish a plan with vs-publish first.');
+    let plan = latestPlan(await linear.comments(card.identifier));
+    const firstPlan = steps.indexOf('vs-plan');
+    const needsPlan = steps.findIndex((s) => s === 'vs-dev' || s === 'vs-plan-review');
+    if (!plan && needsPlan >= 0 && (firstPlan < 0 || firstPlan > needsPlan)) {
+      throw new Park('No comment starting with "## VoidShift plan" was found. Publish a plan first, or start the chain with Plan.');
+    }
 
     await linear.setLabels(card, withLabels(card, (l) => l === trigger.label || statusLabel(l), [LABELS.working]));
     const base = defaultBranch(project.path);
     const worktree = join(agentsDir(rc.configDir), 'worktrees', card.identifier);
     ensureWorktree(project.path, worktree, card.branchName, base);
-    if (!work && commitsAhead(worktree, base) === 0) throw new Park(`Branch ${card.branchName} has no changes to check.`);
     say(`working in ${worktree} on ${card.branchName}`);
 
-    const planText = plan ?? '(No plan was posted on this card. Check the change against the card itself.)';
-    let findings: string | undefined;
+    const findings = new Map<number, string>();
+    const runs = { plan: 0, dev: 0, qa: 0 };
+    let loops = 0;
     let prUrl = '';
-    for (let round = 1; round <= chain.maxRounds; round++) {
-      const checks: StepResult[] = [];
-      for (const step of chain.steps) {
-        say(`round ${round}: ${STEPS[step].label}`);
-        const log = (name: string) => join(runDir, `r${round}-${name}.log`);
-        if (step === 'vs-dev') {
-          const dev = await runAgent({
-            engine: config.engine, model: config.models.dev, cwd: worktree, write: true, logFile: log('dev'),
-            prompt: buildPrompt({ skill: skill('vs-dev'), card, plan: planText, base, round, findings }),
-          });
-          const result = parseDevResult(dev.output);
-          if (result.status === 'blocked') throw new Park(`The dev agent stopped: ${result.reason}`);
-          if (commitsAhead(worktree, base) === 0) throw new Park('The dev agent made no commits.');
-          push(worktree, card.branchName);
-          prUrl = ensureDraftPr(worktree, card.branchName, base, `${card.identifier}: ${card.title}`, `${card.url}\n\nOpened by VoidShift.`);
-          await linear.setLabels(card, withLabels(card, () => false, [LABELS.dev(round)]));
-        } else if (step === 'ci') {
-          checks.push({ step: 'CI', ...(await waitForChecks(worktree, card.branchName)) });
-        } else if (step === 'vs-qa-review') {
-          const r = await runAgent({
-            engine: config.engine, model: config.models.review, cwd: worktree, write: false, logFile: log('review'),
-            prompt: buildPrompt({ skill: skill('vs-qa-review'), card, plan: planText, base, round }),
-          });
-          checks.push({ step: 'Code review', verdict: parseVerdict(r.output), report: r.output });
-        } else if (step === 'vs-qa-ui') {
-          if (!project.uiUrl) {
-            checks.push({ step: 'Browser', verdict: 'SKIP', report: 'No app URL set for this project.' });
-            continue;
-          }
-          const evidence = join(runDir, `r${round}-ui`);
-          mkdirSync(evidence, { recursive: true });
-          const r = await runAgent({
-            engine: config.engine, model: config.models.ui, cwd: worktree, write: false, logFile: log('ui'),
-            prompt: buildPrompt({ skill: skill('vs-qa-ui'), card, plan: planText, base, round, extra: `# Where\n\nApp URL: ${project.uiUrl}\nEvidence folder: ${evidence}` }),
-          });
-          checks.push({ step: 'Browser', verdict: parseVerdict(r.output), report: r.output });
-        }
-      }
+    const planText = () => plan ?? '(No plan was posted on this card. Check the work against the card itself.)';
+    const logFile = (name: string) => join(runDir, `${String(runs.plan + runs.dev + runs.qa).padStart(2, '0')}-${name}.log`);
 
-      const summary = checks.map((r) => `- ${r.step}: ${r.verdict}`).join('\n') || '- no checks in this chain';
-      if (checks.length) await linear.setLabels(card, withLabels(card, () => false, [LABELS.qa(round)]));
-
-      if (qaPassed(checks)) {
-        let moved = false;
-        if (work) {
-          markReady(worktree, card.branchName);
-          moved = await linear.moveTo(card, config.reviewState);
-        }
-        await linear.setLabels(card, withLabels(card, (l) => l === LABELS.working, [LABELS.verified]));
-        await linear.comment(card, `**VoidShift: checks passed on round ${round}.**\n\n${summary}${prUrl ? `\n\nPR ready for review: ${prUrl}` : ''}${work && !moved ? `\n\n(No "${config.reviewState}" state on this team, so the card was not moved.)` : ''}`);
-        say(`verified on round ${round}`);
-        return 'verified';
+    async function check(step: StepId): Promise<StepResult> {
+      const label = STEPS[step].label;
+      if (step === 'ci') {
+        if (!prUrl) return { step: label, verdict: 'SKIP', report: 'No pull request yet.' };
+        return { step: label, ...(await waitForChecks(worktree, card.branchName)) };
       }
-
-      findings = findingsFor(checks);
-      await linear.comment(card, `**VoidShift round ${round}: changes needed.**\n\n${summary}\n\n${findings}`);
-      if (!work) {
-        await linear.setLabels(card, withLabels(card, (l) => l === LABELS.working, [LABELS.changes]));
-        say('changes requested');
-        return 'changes';
-      }
+      if (step === 'vs-qa-ui' && !project.uiUrl) return { step: label, verdict: 'SKIP', report: 'No app URL set for this project.' };
+      if (step === 'vs-qa-review' && commitsAhead(worktree, base) === 0) return { step: label, verdict: 'SKIP', report: 'No changes on the branch yet.' };
+      const extra = step === 'vs-qa-ui' ? `# Where\n\nApp URL: ${project.uiUrl}\nEvidence folder: ${runDir}\n\n${UNATTENDED}` : UNATTENDED;
+      const r = await runAgent({
+        engine: config.engine, model: config.models.review, cwd: worktree, write: false, logFile: logFile(step),
+        prompt: buildPrompt({ skill: skill(step), card, plan: planText(), base, round: runs.qa + 1, extra }),
+      });
+      return { step: label, verdict: parseVerdict(r.output), report: r.output };
     }
-    throw new Park(`Checks still failed after ${chain.maxRounds} rounds. Latest findings are in the comment above. PR: ${prUrl}`);
+
+    let i = 0;
+    while (i < steps.length) {
+      const step = steps[i]!;
+      say(`${STEPS[step].label}`);
+
+      if (isVerdict(step)) {
+        const [start, end] = verdictBlock(steps, i, isVerdict);
+        const results: StepResult[] = [];
+        for (const s of steps.slice(start, end)) results.push(await check(s));
+        runs.qa++;
+        await linear.setLabels(card, withLabels(card, () => false, [LABELS.qa(runs.qa)]));
+        const summary = results.map((r) => `- ${r.step}: ${r.verdict}`).join('\n');
+        if (qaPassed(results)) {
+          i = end;
+          continue;
+        }
+        const notes = findingsFor(results);
+        await linear.comment(card, `**VoidShift: changes needed.**\n\n${summary}\n\n${notes}`);
+        const target = fixTarget(steps, start, isProducer);
+        if (target < 0) {
+          await linear.setLabels(card, withLabels(card, (l) => l === LABELS.working, [LABELS.changes]));
+          say('changes requested');
+          return 'changes';
+        }
+        if (++loops > chain.maxRounds) throw new Park(`Checks still failed after sending the work back ${chain.maxRounds} times. Latest findings are in the comment above.${prUrl ? ` PR: ${prUrl}` : ''}`);
+        findings.set(target, notes);
+        i = target;
+        continue;
+      }
+
+      if (step === 'vs-plan') {
+        const r = await runAgent({
+          engine: config.engine, model: config.models.dev, cwd: worktree, write: false, logFile: logFile('plan'),
+          prompt: buildPrompt({ skill: skill('vs-plan'), card, plan: plan ?? '(none yet, you are writing it)', base, round: runs.plan + 1, findings: findings.get(i), extra: UNATTENDED }),
+        });
+        const result = parseDevResult(r.output);
+        if (result.status === 'blocked') throw new Park(`The plan agent stopped: ${result.reason}`);
+        plan = planBody(r.output);
+        await linear.comment(card, `${PLAN_HEADING}\n\n${plan}`);
+        runs.plan++;
+        await linear.setLabels(card, withLabels(card, () => false, [LABELS.plan(runs.plan)]));
+      } else if (step === 'vs-publish') {
+        push(worktree, card.branchName);
+      } else if (step === 'vs-dev') {
+        const dev = await runAgent({
+          engine: config.engine, model: config.models.dev, cwd: worktree, write: true, logFile: logFile('dev'),
+          prompt: buildPrompt({ skill: skill('vs-dev'), card, plan: planText(), base, round: runs.dev + 1, findings: findings.get(i) }),
+        });
+        const result = parseDevResult(dev.output);
+        if (result.status === 'blocked') throw new Park(`The dev agent stopped: ${result.reason}`);
+        if (commitsAhead(worktree, base) === 0) throw new Park('The dev agent made no commits.');
+        push(worktree, card.branchName);
+        prUrl = ensureDraftPr(worktree, card.branchName, base, `${card.identifier}: ${card.title}`, `${card.url}\n\nOpened by VoidShift.`);
+        runs.dev++;
+        await linear.setLabels(card, withLabels(card, () => false, [LABELS.dev(runs.dev)]));
+      }
+      findings.delete(i);
+      i++;
+    }
+
+    let moved = false;
+    if (hasWork(chain)) {
+      markReady(worktree, card.branchName);
+      moved = await linear.moveTo(card, config.reviewState);
+    }
+    await linear.setLabels(card, withLabels(card, (l) => l === LABELS.working, [LABELS.verified]));
+    await linear.comment(card, `**VoidShift: chain ${trigger.chain} finished, every check passed.**${prUrl ? `\n\nPR ready for review: ${prUrl}` : ''}${hasWork(chain) && !moved ? `\n\n(No "${config.reviewState}" state on this team, so the card was not moved.)` : ''}`);
+    say('verified');
+    return 'verified';
   } catch (err) {
     if (err instanceof Park) return park(err.message);
     return park(`Something went wrong: ${(err as Error).message}`);

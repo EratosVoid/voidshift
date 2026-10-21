@@ -96,3 +96,18 @@ anything a human must click.
 - No ticket ids in code comments.
 - No em dashes or en dashes.
 - No narration of process. State findings.
+
+## When VoidShift runs you in a chain
+
+The card is in the prompt and nobody can answer. Skip the Linear fetch and the
+questions: pick the sensible default for anything open and state it under
+Understanding. Do not write a plan file. Return the plan in the shape above as
+your final message, then one last line, exactly one of:
+
+```
+RESULT: DONE
+RESULT: BLOCKED <one line reason>
+```
+
+If findings from a plan review are in the prompt, revise the plan to address
+every one, or say in one line why a finding is wrong.

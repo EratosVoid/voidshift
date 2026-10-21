@@ -3,7 +3,7 @@ import { existsSync, lstatSync, mkdirSync, readdirSync, readlinkSync, rmSync, sy
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { AGENTS, STEPS, agentsDir, allChains, describeChain, stepEnabled, visibleAgents, readAgentsConfig, writeAgentsConfig, type AgentsConfig, type StepId } from './config.ts';
+import { AGENTS, STEPS, isProducer, agentsDir, allChains, describeChain, stepEnabled, visibleAgents, readAgentsConfig, writeAgentsConfig, type AgentsConfig, type StepId } from './config.ts';
 import { looksLikeLinearKey, readLinearKey, storeLinearKey } from './keychain.ts';
 import { runnerLoaded, startRunner, stopRunner } from './launchd.ts';
 import { createLinear } from './linear.ts';
@@ -173,9 +173,9 @@ async function setupChains(ui: Ui, config: AgentsConfig, log: (l: string) => voi
   log(
     [
       'A chain is the agents that run, in order, when a card is handed over.',
-      'Each round runs every step. If a check (CI or Code review) finds problems,',
-      'the next round sends them back to Dev, until the checks pass or the round',
-      'limit parks the card for you to look at.',
+      'Steps run in order. When a check (Plan review, CI, Code review) finds',
+      'problems, the work goes back to the step that made it, Plan or Dev, with',
+      'the findings, until the checks pass or the limit parks the card for you.',
     ].join('\n'),
   );
   const usable = (steps: StepId[]) => steps.every((s) => stepEnabled(s, config.enabled));
@@ -199,9 +199,8 @@ async function setupChains(ui: Ui, config: AgentsConfig, log: (l: string) => voi
       if (pick === DONE) break;
       steps.push(pick);
     }
-    const work = steps.some((s) => STEPS[s].kind === 'work');
-    const rounds = work
-      ? Number(await ui.text('If a check fails, how many rounds back to Dev before parking?', { initial: '3', validate: (v) => (/^[1-9]$/.test(v) ? undefined : '1 to 9') }))
+    const rounds = steps.some(isProducer)
+      ? Number(await ui.text('If a check fails, how many times can it send the work back before parking?', { initial: '3', validate: (v) => (/^[1-9]$/.test(v) ? undefined : '1 to 9') }))
       : 1;
     config.chains[name] = { steps, maxRounds: rounds };
     log(`Chain ${name}: ${describeChain(config.chains[name]!)}`);

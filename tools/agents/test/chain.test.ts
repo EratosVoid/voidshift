@@ -68,6 +68,27 @@ test('prompt inlines the skill body without frontmatter', () => {
   assert.match(p, /^# Implement/);
   assert.match(p, /Card ENG-1: Fix it/);
   assert.match(p, /Round 2\. Base branch: `main`/);
-  assert.match(p, /QA findings to fix\n\na\.ts:1 bad/);
+  assert.match(p, /Findings to address\n\na\.ts:1 bad/);
   assert.doesNotMatch(p, /name: vs-dev/);
+});
+
+import { fixTarget, planBody, verdictBlock } from '../src/chain.ts';
+
+const steps = ['vs-plan', 'vs-plan-review', 'vs-dev', 'ci', 'vs-qa-review'];
+const verdict = (s: string) => ['vs-plan-review', 'ci', 'vs-qa-review'].includes(s);
+const producer = (s: string) => s === 'vs-plan' || s === 'vs-dev';
+
+test('consecutive checks run as one block', () => {
+  assert.deepEqual(verdictBlock(steps, 3, verdict), [3, 5]);
+  assert.deepEqual(verdictBlock(steps, 1, verdict), [1, 2]);
+});
+
+test('a failed check goes back to the nearest producer', () => {
+  assert.equal(fixTarget(steps, 1, producer), 0);
+  assert.equal(fixTarget(steps, 3, producer), 2);
+  assert.equal(fixTarget(['ci', 'vs-qa-review'], 0, producer), -1);
+});
+
+test('plan body drops the RESULT line', () => {
+  assert.equal(planBody('**Understanding.** x\n\nRESULT: DONE'), '**Understanding.** x');
 });

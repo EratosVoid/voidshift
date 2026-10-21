@@ -8,11 +8,12 @@ export const LABELS = {
   changes: 'vs-changes-requested',
   verified: 'vs-qa-verified',
   parked: 'vs-parked',
+  plan: (round: number) => `vs-plan-v${round}`,
   dev: (round: number) => `vs-dev-v${round}`,
   qa: (round: number) => `vs-qa-v${round}`,
 };
 
-export const isRoundLabel = (name: string) => /^vs-(dev|qa)-v\d+$/.test(name);
+export const isRoundLabel = (name: string) => /^vs-(plan|dev|qa)-v\d+$/.test(name);
 
 export type Verdict = 'SHIP' | 'FIX' | 'SKIP';
 
@@ -86,7 +87,27 @@ export function buildPrompt(p: PromptInput): string {
     p.plan,
     `# Round\n\nRound ${p.round}. Base branch: \`${p.base}\`.`,
   ];
-  if (p.findings) parts.push('# QA findings to fix', p.findings);
+  if (p.findings) parts.push('# Findings to address', p.findings);
   if (p.extra) parts.push(p.extra);
   return parts.filter(Boolean).join('\n\n');
+}
+
+// Consecutive verdict steps run as one block so every finding comes back at
+// once. Returns [start, end) of the block that starts at `i`.
+export function verdictBlock<T extends string>(steps: T[], i: number, isVerdict: (s: T) => boolean): [number, number] {
+  let end = i;
+  while (end < steps.length && isVerdict(steps[end]!)) end++;
+  return [i, end];
+}
+
+// Where a failed check sends the work: the nearest earlier step that produces
+// something. -1 means nothing to send it back to.
+export function fixTarget<T extends string>(steps: T[], blockStart: number, isProducer: (s: T) => boolean): number {
+  for (let j = blockStart - 1; j >= 0; j--) if (isProducer(steps[j]!)) return j;
+  return -1;
+}
+
+// Plan output minus the trailing RESULT line, ready to post.
+export function planBody(output: string): string {
+  return output.replace(/^\s*RESULT:.*$/gim, '').trim();
 }

@@ -2,16 +2,24 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import type { Engine } from './engine.ts';
 
-// A step in a chain. Work steps change code; check steps return a verdict.
-export type StepId = 'vs-dev' | 'ci' | 'vs-qa-review' | 'vs-qa-ui';
+// A step in a chain, and what it produces: a plan, a verdict on what came
+// before it, commits, or the hand-over of a published plan.
+export type StepId = 'vs-plan' | 'vs-plan-review' | 'vs-publish' | 'vs-dev' | 'ci' | 'vs-qa-review' | 'vs-qa-ui';
+export type Output = 'plan' | 'verdict' | 'commits' | 'publish';
 
-export const STEPS: Record<StepId, { label: string; kind: 'work' | 'check'; hint: string; hidden?: boolean }> = {
-  'vs-dev': { label: 'Dev', kind: 'work', hint: 'implements the plan, commits, opens a draft PR' },
-  ci: { label: 'CI', kind: 'check', hint: "waits for the PR's checks" },
-  'vs-qa-review': { label: 'Code review', kind: 'check', hint: 'reviews the diff against the card and plan' },
+export const STEPS: Record<StepId, { label: string; output: Output; hint: string; hidden?: boolean }> = {
+  'vs-plan': { label: 'Plan', output: 'plan', hint: 'writes a plan and posts it to the card' },
+  'vs-plan-review': { label: 'Plan review', output: 'verdict', hint: 'checks the plan; on FIX the chain goes back to Plan' },
+  'vs-publish': { label: 'Publish', output: 'publish', hint: 'creates and pushes the branch for the card' },
+  'vs-dev': { label: 'Dev', output: 'commits', hint: 'implements the plan, commits, opens a draft PR' },
+  ci: { label: 'CI', output: 'verdict', hint: "waits for the PR's checks; on FIX back to Dev" },
+  'vs-qa-review': { label: 'Code review', output: 'verdict', hint: 'reviews the change; on FIX back to Dev' },
   // Off until the runner can start the app from the agent's branch itself.
-  'vs-qa-ui': { label: 'Browser check', kind: 'check', hint: "clicks through the app at the project's URL", hidden: true },
+  'vs-qa-ui': { label: 'Browser check', output: 'verdict', hint: "clicks through the app at the project's URL", hidden: true },
 };
+
+// Steps a failed verdict can send work back to.
+export const isProducer = (s: StepId) => STEPS[s].output === 'plan' || STEPS[s].output === 'commits';
 
 // The agents in the pack, as setup describes them.
 export const AGENTS: Record<string, { label: string; hint: string; hidden?: boolean }> = {
@@ -66,6 +74,7 @@ export interface AgentsConfig {
 // Shipped with VoidShift; custom chains sit beside them.
 export const BUILT_IN_CHAINS: Record<string, Chain> = {
   build: { steps: ['vs-dev', 'ci', 'vs-qa-review'], maxRounds: 3 },
+  'plan-and-build': { steps: ['vs-plan', 'vs-plan-review', 'vs-dev', 'ci', 'vs-qa-review'], maxRounds: 3 },
   'review-only': { steps: ['ci', 'vs-qa-review'], maxRounds: 1 },
 };
 
@@ -84,7 +93,8 @@ export const agentsDir = (configDir: string) => join(configDir, 'agents');
 const configPath = (configDir: string) => join(agentsDir(configDir), 'config.json');
 
 export const allChains = (c: AgentsConfig): Record<string, Chain> => ({ ...BUILT_IN_CHAINS, ...c.chains });
-export const hasWork = (chain: Chain) => chain.steps.some((s) => STEPS[s].kind === 'work');
+export const hasWork = (chain: Chain) => chain.steps.some((s) => STEPS[s].output === 'commits');
+export const hasProducer = (chain: Chain) => chain.steps.some(isProducer);
 export const describeChain = (chain: Chain) => chain.steps.map((s) => STEPS[s].label).join(' → ');
 
 // Older configs mapped a team straight to a repo; turn each into a project and
