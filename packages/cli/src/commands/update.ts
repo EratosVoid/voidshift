@@ -6,10 +6,12 @@ import { configDir, readConfig } from '../config.ts';
 import { findTool } from '../registry.ts';
 import { CLI_PKG, cliVersion, isNewer } from '../version.ts';
 
-const QUIET = ['--silent', '--no-audit', '--no-fund'];
+// --prefer-online: right after a release npm's local metadata cache can still
+// name the previous version as latest.
+const QUIET = ['--silent', '--no-audit', '--no-fund', '--prefer-online'];
 
 export function latestVersion(pkg: string): string | null {
-  const r = spawnSync('npm', ['view', pkg, 'version'], { encoding: 'utf8', timeout: 15_000 });
+  const r = spawnSync('npm', ['view', '--prefer-online', pkg, 'version'], { encoding: 'utf8', timeout: 15_000 });
   return r.status === 0 ? r.stdout.trim() || null : null;
 }
 

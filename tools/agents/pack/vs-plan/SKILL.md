@@ -62,17 +62,32 @@ the card, one line per question, each with the option you would pick. Where a
 sensible default exists, pick it and say so.
 
 Then write the plan to `~/.config/voidshift/plans/<CARD>.md` (create the
-folder if needed). Show the developer a short summary
-and the path. Never post to Linear from this agent; `vs-publish` does that.
+folder if needed). Never post to Linear from this agent; `vs-publish` does that.
+
+## 5. Get it reviewed before showing it
+
+The developer should only ever see a plan that has already been reviewed.
+
+1. Run the `vs-plan-review` checks as a separate pass with fresh eyes: in Claude
+   Code, hand them to a subagent with the card id and the plan file path; where
+   no subagent is available, re-read the plan cold and apply that checklist
+   yourself.
+2. If it says FIX, fix the plan file for every finding that is right. Where a
+   finding is wrong, keep the plan and note why in one line.
+3. Repeat until it says SHIP, at most 3 rounds. If it still says FIX after 3,
+   stop and show what is left as decisions for the developer.
+
+Then show the developer the short version below.
 
 ## What you show the developer
 
 The plan file holds the detail. In the chat, keep it short and plain:
 
+- First line: `Reviewed: ready after N rounds.` or `Reviewed: N things still need your call.`
 - One or two lines: what the card really needs, and what it got wrong.
 - The steps, one short sentence each, no file paths.
 - Any decision only they can make, as a question with your pick.
-- The path to the plan file.
+- The path to the plan file, and that `/vs-publish <CARD>` hands it over.
 
 ## Plan shape (the file)
 
@@ -108,8 +123,8 @@ anything a human must click.
 
 ## When VoidShift runs you in a workflow
 
-The card is in the prompt and nobody can answer. Skip the Linear fetch and the
-questions: pick the sensible default for anything open and state it under
+The card is in the prompt and nobody can answer. Skip the Linear fetch, the
+questions and step 5 (the workflow runs its own review): pick the sensible default for anything open and state it under
 Understanding. Do not write a plan file. Return the plan in the shape above as
 your final message, then one last line, exactly one of:
 
