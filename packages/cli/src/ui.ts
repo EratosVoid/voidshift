@@ -26,4 +26,7 @@ export const ui: Ui = {
   async select<T extends string>(message: string, choices: Choice<T>[], initial?: T) {
     return unwrap(await p.select<T>({ message, options: choices as never, initialValue: initial }));
   },
+  async multiselect<T extends string>(message: string, choices: Choice<T>[], initial: T[] = []) {
+    return unwrap(await p.multiselect<T>({ message, options: choices as never, initialValues: initial, required: false }));
+  },
 };

@@ -13,18 +13,50 @@ import type { Check, Tool, ToolContext, Ui } from './types.ts';
 const packDir = fileURLToPath(new URL('../pack/', import.meta.url));
 const packNames = () => readdirSync(packDir).filter((n) => existsSync(join(packDir, n, 'SKILL.md')));
 
-// Where each agent CLI looks for user-level skills. Claude Code reads
-// CLAUDE_CONFIG_DIR when set and ~/.claude otherwise, and people switch
-// between the two, so both get the agents.
-function skillDirs(): { name: string; dir: string; present: boolean }[] {
-  const has = (cmd: string) => spawnSync(cmd, ['--version'], { encoding: 'utf8' }).status === 0;
-  const claude = has('claude');
-  const claudeHomes = [...new Set([process.env.CLAUDE_CONFIG_DIR, join(homedir(), '.claude')].filter((d): d is string => !!d))];
-  const codexHome = process.env.CODEX_HOME ?? join(homedir(), '.codex');
-  return [
-    ...claudeHomes.map((h) => ({ name: `Claude Code`, dir: join(h, 'skills'), present: claude })),
-    { name: 'Codex', dir: join(codexHome, 'skills'), present: has('codex') },
-  ];
+type Home = { kind: 'claude' | 'codex'; dir: string };
+
+const has = (cmd: string) => spawnSync(cmd, ['--version'], { encoding: 'utf8' }).status === 0;
+const tilde = (p: string) => p.replace(homedir(), '~');
+const homeLabel = (h: Home) => `${h.kind === 'claude' ? 'Claude Code' : 'Codex'}  ${tilde(h.dir)}`;
+
+// Config folders that could hold the agents: Claude Code reads
+// CLAUDE_CONFIG_DIR or ~/.claude, Codex reads CODEX_HOME or ~/.codex, plus any
+// folder chosen before.
+function candidateHomes(saved: Home[]): Home[] {
+  const found: Home[] = [];
+  if (has('claude')) {
+    for (const d of [process.env.CLAUDE_CONFIG_DIR, join(homedir(), '.claude')]) if (d) found.push({ kind: 'claude', dir: resolve(d) });
+  }
+  if (has('codex')) found.push({ kind: 'codex', dir: resolve(process.env.CODEX_HOME ?? join(homedir(), '.codex')) });
+  const all = [...saved, ...found];
+  return all.filter((h, i) => all.findIndex((o) => o.dir === h.dir) === i);
+}
+
+// Before a choice is saved, tick only the folder Claude Code is using right
+// now (or Codex when Claude is not installed). More is one keypress away.
+function defaultHomes(candidates: Home[]): Home[] {
+  const first = candidates.find((h) => h.kind === 'claude') ?? candidates.find((h) => h.kind === 'codex');
+  return first ? [first] : [];
+}
+
+async function chooseHomes(ui: Ui, saved: Home[]): Promise<Home[]> {
+  const candidates = candidateHomes(saved);
+  const initial = (saved.length ? saved : defaultHomes(candidates)).map((h) => h.dir);
+  const OTHER = '__other__';
+  const picked = await ui.multiselect(
+    'Install the agents into which Claude Code / Codex folders?',
+    [...candidates.map((h) => ({ value: h.dir, label: homeLabel(h) })), { value: OTHER, label: 'Another Claude Code folder...' }],
+    initial,
+  );
+  const homes = candidates.filter((h) => picked.includes(h.dir));
+  if (picked.includes(OTHER)) {
+    const dir = await ui.text('Path to the Claude Code config folder (the one with settings.json)', {
+      placeholder: '~/work/claude',
+      validate: (v) => (existsSync(expandHome(v.trim())) ? undefined : 'That folder does not exist'),
+    });
+    homes.push({ kind: 'claude', dir: resolve(expandHome(dir.trim())) });
+  }
+  return homes;
 }
 
 // Asks for the key, checks it against Linear, and only then stores it.
@@ -63,19 +95,26 @@ const isOurLink = (path: string) => {
   }
 };
 
-function linkPack(log: (l: string) => void): void {
-  for (const target of skillDirs().filter((t) => t.present)) {
-    mkdirSync(target.dir, { recursive: true });
+// Links every agent into each chosen home and removes our links from the rest.
+function syncLinks(chosen: Home[], all: Home[], log: (l: string) => void): void {
+  for (const home of all) {
+    const skills = join(home.dir, 'skills');
+    const wanted = chosen.some((h) => h.dir === home.dir);
+    if (!wanted) {
+      for (const name of packNames()) if (isOurLink(join(skills, name))) rmSync(join(skills, name));
+      continue;
+    }
+    mkdirSync(skills, { recursive: true });
     for (const name of packNames()) {
-      const dest = join(target.dir, name);
-      if (existsSync(dest) || isOurLink(dest)) {
-        if (isOurLink(dest)) continue;
-        log(`Skipped ${name} in ${target.name}: something else is already at ${dest}`);
+      const dest = join(skills, name);
+      if (isOurLink(dest)) continue;
+      if (existsSync(dest)) {
+        log(`Skipped ${name} in ${tilde(home.dir)}: something else is already there`);
         continue;
       }
       symlinkSync(join(packDir, name), dest);
     }
-    log(`Agents linked into ${target.name} (${target.dir})`);
+    log(`Agents installed in ${homeLabel(home)}`);
   }
 }
 
@@ -100,16 +139,20 @@ const agents: Tool = {
 
   async install(ctx) {
     const { ui } = ctx;
-    const present = skillDirs().filter((t) => t.present);
-    if (!present.length) throw new Error('install Claude Code or Codex first');
     const config = readAgentsConfig(ctx.configDir);
+    if (!candidateHomes(config.homes).length) throw new Error('install Claude Code or Codex first');
 
-    const engines = [...new Set(present.map((t) => (t.name === 'Codex' ? 'codex' : 'claude')))] as ('claude' | 'codex')[];
+    const homes = await chooseHomes(ui, config.homes);
+    if (!homes.length) throw new Error('pick at least one folder to install the agents into');
+    syncLinks(homes, candidateHomes([...config.homes, ...homes]), ctx.log);
+    config.homes = homes;
+
+    const engines = [...new Set(homes.map((h) => h.kind))];
     const engine =
       engines.length === 1
         ? engines[0]!
         : await ui.select(
-            'Which agent CLI should run the background agents?',
+            'Which one should run the background agents?',
             [
               { value: 'claude', label: 'Claude Code', hint: 'your Claude subscription' },
               { value: 'codex', label: 'Codex', hint: 'your ChatGPT subscription' },
@@ -118,8 +161,6 @@ const agents: Tool = {
           );
     if (engine !== config.engine) config.models = engine === 'codex' ? {} : { dev: 'opus', review: 'sonnet', ui: 'sonnet' };
     config.engine = engine;
-
-    linkPack(ctx.log);
 
     const name = await currentLinearUser();
     if (!name || !(await ui.confirm(`Keep using Linear as ${name}?`))) {
@@ -156,21 +197,20 @@ const agents: Tool = {
 
   async uninstall(ctx) {
     stopRunner(ctx.home);
-    for (const target of skillDirs()) for (const name of packNames()) {
-      const dest = join(target.dir, name);
-      if (isOurLink(dest)) rmSync(dest);
-    }
+    syncLinks([], candidateHomes(readAgentsConfig(ctx.configDir).homes), ctx.log);
     ctx.log('Agents unlinked and the runner stopped. Config and the Linear key were kept.');
   },
 
   async checks(ctx): Promise<Check[]> {
     const checks: Check[] = [];
-    for (const t of skillDirs().filter((t) => t.present)) {
-      const missing = packNames().filter((n) => !isOurLink(join(t.dir, n)));
+    const homes = readAgentsConfig(ctx.configDir).homes;
+    if (!homes.length) checks.push({ name: 'agents installed', status: 'warn', detail: 'in no Claude Code or Codex folder', fix: 'voidshift' });
+    for (const h of homes) {
+      const missing = packNames().filter((n) => !isOurLink(join(h.dir, 'skills', n)));
       checks.push(
         missing.length === 0
-          ? { name: `agents in ${t.name} (${t.dir.replace(homedir(), "~")})`, status: 'ok', detail: `${packNames().length} linked` }
-          : { name: `agents in ${t.name} (${t.dir.replace(homedir(), "~")})`, status: 'warn', detail: `missing ${missing.join(', ')}`, fix: 'voidshift add agents' },
+          ? { name: `agents in ${homeLabel(h)}`, status: 'ok', detail: `${packNames().length} linked` }
+          : { name: `agents in ${homeLabel(h)}`, status: 'warn', detail: `missing ${missing.join(', ')}`, fix: 'voidshift' },
       );
     }
     try {

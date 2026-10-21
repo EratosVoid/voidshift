@@ -26,6 +26,7 @@ export interface Ui {
   secret(message: string, validate?: (v: string) => string | undefined): Promise<string>;
   confirm(message: string, initial?: boolean): Promise<boolean>;
   select<T extends string>(message: string, choices: Choice<T>[], initial?: T): Promise<T>;
+  multiselect<T extends string>(message: string, choices: Choice<T>[], initial?: T[]): Promise<T[]>;
 }
 
 export interface ToolContext {

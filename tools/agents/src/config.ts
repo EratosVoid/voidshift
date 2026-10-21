@@ -14,6 +14,8 @@ export interface AgentsConfig {
   uiUrls: Record<string, string>;
   // Linear state a verified card moves to.
   reviewState: string;
+  // Config folders the agents are linked into, e.g. ~/.claude or ~/.codex.
+  homes: { kind: 'claude' | 'codex'; dir: string }[];
 }
 
 export const DEFAULTS: AgentsConfig = {
@@ -23,6 +25,7 @@ export const DEFAULTS: AgentsConfig = {
   repos: {},
   uiUrls: {},
   reviewState: 'In Review',
+  homes: [],
 };
 
 export const agentsDir = (configDir: string) => join(configDir, 'agents');
