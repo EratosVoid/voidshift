@@ -16,7 +16,7 @@ import {
   verdictBlock,
   type StepResult,
 } from './chain.ts';
-import { STEPS, agentsDir, allChains, hasWork, isProducer, type AgentsConfig, type Chain, type Project, type StepId, type Trigger } from './config.ts';
+import { STEPS, agentsDir, hasWork, isProducer, type AgentsConfig, type Chain, type Project, type StepId, type Trigger } from './config.ts';
 import { runAgent } from './engine.ts';
 import { commitsAhead, defaultBranch, ensureDraftPr, ensureWorktree, markReady, push, resetWorktree, waitForChecks } from './git.ts';
 import type { Card, Linear } from './linear.ts';
@@ -176,7 +176,7 @@ export async function runCard(card: Card, trigger: Trigger, chain: Chain, projec
       moved = await linear.moveTo(card, config.reviewState);
     }
     await linear.setLabels(card, withLabels(card, (l) => l === LABELS.working, [LABELS.verified]));
-    await linear.comment(card, `**VoidShift: chain ${trigger.chain} finished, every check passed.**${prUrl ? `\n\nPR ready for review: ${prUrl}` : ''}${hasWork(chain) && !moved ? `\n\n(No "${config.reviewState}" state on this team, so the card was not moved.)` : ''}`);
+    await linear.comment(card, `**VoidShift: every step passed.**${prUrl ? `\n\nPR ready for review: ${prUrl}` : ''}${hasWork(chain) && !moved ? `\n\n(No "${config.reviewState}" state on this team, so the card was not moved.)` : ''}`);
     say('verified');
     return 'verified';
   } catch (err) {
@@ -185,12 +185,15 @@ export async function runCard(card: Card, trigger: Trigger, chain: Chain, projec
   }
 }
 
-// The first card waiting on any trigger, in trigger order.
-export async function nextJob(rc: RunContext, only?: string): Promise<{ card: Card; trigger: Trigger } | null> {
-  for (const trigger of rc.config.triggers) {
-    const cards = only ? [await rc.linear.card(only)] : await rc.linear.myCardsWithLabel(trigger.label);
-    const card = cards.find((c) => c.teamKey === trigger.team && c.labels.includes(trigger.label));
-    if (card) return { card, trigger };
+// The first card waiting on any chain's triggers, in chain order.
+export async function nextJob(rc: RunContext, only?: string): Promise<{ card: Card; trigger: Trigger; chain: string } | null> {
+  const pinned = only ? await rc.linear.card(only) : null;
+  for (const [name, chain] of Object.entries(rc.config.chains)) {
+    for (const trigger of chain.triggers) {
+      const cards = pinned ? [pinned] : await rc.linear.myCardsWithLabel(trigger.label);
+      const card = cards.find((c) => c.teamKey === trigger.team && c.labels.includes(trigger.label));
+      if (card) return { card, trigger, chain: name };
+    }
   }
   return null;
 }
@@ -212,13 +215,13 @@ export async function tick(rc: RunContext, only?: string): Promise<number> {
   try {
     const job = await nextJob(rc, only);
     if (!job) {
-      if (only) rc.log(`${only} matches no trigger: it needs a trigger's team and label.`);
+      if (only) rc.log(`${only} starts no chain: it needs a chain's team and label.`);
       return only ? 1 : 0;
     }
-    const chain = allChains(rc.config)[job.trigger.chain];
-    const project = rc.config.projects[job.trigger.project];
-    if (!chain || !project) {
-      rc.log(`Trigger ${job.trigger.team} + ${job.trigger.label} points at a missing chain or project. Run voidshift to fix it.`);
+    const chain = rc.config.chains[job.chain]!;
+    const project = rc.config.projects[chain.project];
+    if (!project) {
+      rc.log(`Chain ${job.chain} points at a missing project ${chain.project}. Run voidshift to fix it.`);
       return 1;
     }
     const outcome = await runCard(job.card, job.trigger, chain, project, rc);

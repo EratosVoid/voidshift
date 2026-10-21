@@ -31,10 +31,11 @@ export const visibleAgents = () => Object.keys(AGENTS);
 
 export const stepEnabled = (step: StepId, enabled: string[]) => enabled.includes(step);
 
-export interface Chain {
-  steps: StepId[];
-  // How many times a failed check sends the work back before parking.
-  maxRounds: number;
+// What starts a chain: my cards in this Linear team carrying this label.
+export interface Trigger {
+  source: 'linear';
+  team: string;
+  label: string;
 }
 
 export interface Project {
@@ -43,11 +44,12 @@ export interface Project {
   uiUrl?: string;
 }
 
-export interface Trigger {
-  source: 'linear';
-  team: string;
-  label: string;
-  chain: string;
+// A chain starts on its triggers, runs its steps in order, in its project.
+export interface Chain {
+  triggers: Trigger[];
+  steps: StepId[];
+  // How many times a failed check sends the work back before parking.
+  maxRounds: number;
   project: string;
 }
 
@@ -57,7 +59,6 @@ export interface AgentsConfig {
   models: { dev?: string; review?: string; ui?: string };
   projects: Record<string, Project>;
   chains: Record<string, Chain>;
-  triggers: Trigger[];
   // Linear state a verified card moves to.
   reviewState: string;
   // Config folders the agents are linked into, e.g. ~/.claude or ~/.codex.
@@ -66,8 +67,8 @@ export interface AgentsConfig {
   enabled: string[];
 }
 
-// Shipped with VoidShift; custom chains sit beside them.
-export const BUILT_IN_CHAINS: Record<string, Chain> = {
+// Step lists to start a chain from.
+export const TEMPLATES: Record<string, { steps: StepId[]; maxRounds: number }> = {
   build: { steps: ['vs-dev', 'vs-qa'], maxRounds: 3 },
   'plan-and-build': { steps: ['vs-plan', 'vs-plan-review', 'vs-dev', 'vs-qa'], maxRounds: 3 },
   'qa-only': { steps: ['vs-qa'], maxRounds: 1 },
@@ -78,7 +79,6 @@ export const DEFAULTS: AgentsConfig = {
   models: { dev: 'opus', review: 'sonnet', ui: 'sonnet' },
   projects: {},
   chains: {},
-  triggers: [],
   reviewState: 'In Review',
   homes: [],
   enabled: [],
@@ -87,40 +87,45 @@ export const DEFAULTS: AgentsConfig = {
 export const agentsDir = (configDir: string) => join(configDir, 'agents');
 const configPath = (configDir: string) => join(agentsDir(configDir), 'config.json');
 
-export const allChains = (c: AgentsConfig): Record<string, Chain> => ({ ...BUILT_IN_CHAINS, ...c.chains });
-export const hasWork = (chain: Chain) => chain.steps.some((s) => STEPS[s].output === 'commits');
-export const hasProducer = (chain: Chain) => chain.steps.some(isProducer);
-export const describeChain = (chain: Chain) => chain.steps.map((s) => STEPS[s].label).join(' → ');
+export const hasWork = (chain: Pick<Chain, 'steps'>) => chain.steps.some((s) => STEPS[s].output === 'commits');
+export const hasProducer = (chain: Pick<Chain, 'steps'>) => chain.steps.some(isProducer);
+export const describeSteps = (steps: StepId[]) => steps.map((s) => STEPS[s].label).join(' → ');
+export const describeTriggers = (triggers: Trigger[]) => triggers.map((t) => `${t.team} + ${t.label}`).join(', ');
+export const describeChain = (c: Chain) => `when ${describeTriggers(c.triggers)}: ${describeSteps(c.steps)} in ${c.project}`;
 
-// Older configs mapped a team straight to a repo; turn each into a project and
-// a build trigger on the vs-plan label.
 // Step ids that were folded into QA.
 const RENAMED: Record<string, StepId | null> = { 'vs-qa-review': 'vs-qa', ci: null, 'vs-qa-ui': null };
+const migrateStepList = (steps: string[]): StepId[] => {
+  const mapped = steps.map((s) => (s in RENAMED ? RENAMED[s] : s)).filter((s): s is StepId => !!s);
+  return mapped.filter((s, i) => !(s === 'vs-qa' && mapped[i - 1] === 'vs-qa'));
+};
 
-function migrateSteps(saved: Record<string, any>): Record<string, any> {
-  if (!saved.chains) return saved;
-  const chains: Record<string, Chain> = {};
-  for (const [name, chain] of Object.entries(saved.chains as Record<string, Chain>)) {
-    const steps = chain.steps.map((s) => (s in RENAMED ? RENAMED[s] : s)).filter((s): s is StepId => !!s);
-    chains[name] = { ...chain, steps: steps.filter((s, i) => !(s === 'vs-qa' && steps[i - 1] === 'vs-qa')) };
-  }
-  const triggers = (saved.triggers ?? []).map((t: Trigger) => (t.chain === 'review-only' ? { ...t, chain: 'qa-only' } : t));
-  const enabled = (saved.enabled ?? []).map((a: string) => (a in RENAMED ? RENAMED[a] : a)).filter(Boolean);
-  return { ...saved, chains, triggers, enabled: [...new Set(enabled)] };
-}
-
-export function migrate(raw: Record<string, any>): Partial<AgentsConfig> {
-  const saved = migrateSteps(raw);
-  if (!saved.repos || saved.triggers) return saved;
-  const projects: Record<string, Project> = {};
-  const triggers: Trigger[] = [];
-  for (const [team, path] of Object.entries(saved.repos as Record<string, string>)) {
+// Earlier shapes: a team mapped straight to a repo, then separate triggers
+// pointing at a chain and a project. Both become chains that own triggers.
+export function migrate(saved: Record<string, any>): Partial<AgentsConfig> {
+  const { repos, uiUrls, maxRounds: _max, triggers, ...rest } = saved;
+  const projects: Record<string, Project> = { ...(saved.projects ?? {}) };
+  const oldTriggers: { team: string; label: string; chain: string; project: string }[] = [...(triggers ?? [])];
+  for (const [team, path] of Object.entries((repos ?? {}) as Record<string, string>)) {
     const name = basename(path);
-    projects[name] = { path, uiUrl: saved.uiUrls?.[team] };
-    triggers.push({ source: 'linear', team, label: 'vs-plan', chain: 'build', project: name });
+    projects[name] = { path, uiUrl: uiUrls?.[team] };
+    oldTriggers.push({ team, label: 'vs-plan', chain: 'build', project: name });
   }
-  const { repos: _repos, uiUrls: _ui, maxRounds: _max, ...rest } = saved;
-  return { ...rest, projects, triggers };
+  const chains: Record<string, Chain> = {};
+  for (const [name, c] of Object.entries((saved.chains ?? {}) as Record<string, any>)) {
+    if (c.project) chains[name] = { ...c, steps: migrateStepList(c.steps) };
+  }
+  for (const t of oldTriggers) {
+    const base = t.chain === 'review-only' ? 'qa-only' : t.chain;
+    const steps = TEMPLATES[base]?.steps ?? migrateStepList(saved.chains?.[t.chain]?.steps ?? []);
+    if (!steps.length) continue;
+    const name = `${t.project}-${base}`;
+    const chain = chains[name] ?? { triggers: [], steps, maxRounds: TEMPLATES[base]?.maxRounds ?? saved.chains?.[t.chain]?.maxRounds ?? 3, project: t.project };
+    chain.triggers.push({ source: 'linear', team: t.team, label: t.label });
+    chains[name] = chain;
+  }
+  const enabled = [...new Set((saved.enabled ?? []).map((a: string) => (a in RENAMED ? RENAMED[a] : a)).filter(Boolean))] as string[];
+  return { ...rest, projects, chains, enabled };
 }
 
 export function readAgentsConfig(configDir: string): AgentsConfig {

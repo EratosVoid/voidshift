@@ -1,27 +1,50 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { BUILT_IN_CHAINS, describeChain, hasWork, migrate } from '../src/config.ts';
+import { TEMPLATES, describeChain, describeSteps, hasWork, migrate } from '../src/config.ts';
 
-test('built-in chains', () => {
-  assert.equal(describeChain(BUILT_IN_CHAINS.build!), 'Dev → QA');
-  assert.ok(hasWork(BUILT_IN_CHAINS.build!));
-  assert.ok(!hasWork(BUILT_IN_CHAINS['qa-only']!));
+test('templates', () => {
+  assert.equal(describeSteps(TEMPLATES.build!.steps), 'Dev → QA');
+  assert.ok(hasWork(TEMPLATES.build!));
+  assert.ok(!hasWork(TEMPLATES['qa-only']!));
 });
 
-test('old team-to-repo configs become projects and build triggers', () => {
-  const m = migrate({ engine: 'claude', repos: { PLX: '/code/plexa' }, uiUrls: { PLX: 'http://localhost:3000' }, maxRounds: 3 });
-  assert.deepEqual(m.projects, { plexa: { path: '/code/plexa', uiUrl: 'http://localhost:3000' } });
-  assert.deepEqual(m.triggers, [{ source: 'linear', team: 'PLX', label: 'vs-plan', chain: 'build', project: 'plexa' }]);
+test('a chain reads as trigger, steps, project', () => {
+  const c = { triggers: [{ source: 'linear' as const, team: 'PLX', label: 'vs-plan' }], steps: TEMPLATES.build!.steps, maxRounds: 3, project: 'plexa' };
+  assert.equal(describeChain(c), 'when PLX + vs-plan: Dev → QA in plexa');
+});
+
+test('old team-to-repo configs become a chain that owns its trigger', () => {
+  const m = migrate({ engine: 'claude', repos: { PLX: '/code/plexa' }, maxRounds: 3 });
+  assert.deepEqual(m.projects, { plexa: { path: '/code/plexa', uiUrl: undefined } });
+  assert.deepEqual(m.chains, {
+    'plexa-build': { triggers: [{ source: 'linear', team: 'PLX', label: 'vs-plan' }], steps: ['vs-dev', 'vs-qa'], maxRounds: 3, project: 'plexa' },
+  });
   assert.equal((m as Record<string, unknown>).repos, undefined);
 });
 
-test('new configs pass through', () => {
-  assert.deepEqual(migrate({ triggers: [], projects: {} }), { triggers: [], projects: {} });
+test('separate triggers fold into chains, two teams on one chain', () => {
+  const m = migrate({
+    projects: { relay: { path: '/code/relay' } },
+    chains: { mine: { steps: ['vs-dev', 'ci', 'vs-qa-review'], maxRounds: 2 } },
+    triggers: [
+      { source: 'linear', team: 'ENG', label: 'vs-plan', chain: 'mine', project: 'relay' },
+      { source: 'linear', team: 'AAI', label: 'vs-plan', chain: 'mine', project: 'relay' },
+      { source: 'linear', team: 'ENG', label: 'vs-review', chain: 'review-only', project: 'relay' },
+    ],
+    enabled: ['vs-dev', 'vs-qa-review', 'vs-qa-ui'],
+  });
+  assert.deepEqual(m.chains?.['relay-mine'], {
+    triggers: [{ source: 'linear', team: 'ENG', label: 'vs-plan' }, { source: 'linear', team: 'AAI', label: 'vs-plan' }],
+    steps: ['vs-dev', 'vs-qa'],
+    maxRounds: 2,
+    project: 'relay',
+  });
+  assert.deepEqual(m.chains?.['relay-qa-only']?.steps, ['vs-qa']);
+  assert.deepEqual(m.enabled, ['vs-dev', 'vs-qa']);
+  assert.equal((m as Record<string, unknown>).triggers, undefined);
 });
 
-test('old CI and code review steps fold into QA', () => {
-  const m = migrate({ chains: { mine: { steps: ['vs-dev', 'ci', 'vs-qa-review', 'vs-qa-ui'], maxRounds: 2 } }, triggers: [{ chain: 'review-only' }], enabled: ['vs-dev', 'vs-qa-review', 'vs-qa-ui'] });
-  assert.deepEqual(m.chains, { mine: { steps: ['vs-dev', 'vs-qa'], maxRounds: 2 } });
-  assert.equal(m.triggers?.[0]?.chain, 'qa-only');
-  assert.deepEqual(m.enabled, ['vs-dev', 'vs-qa']);
+test('current configs pass through', () => {
+  const chains = { a: { triggers: [], steps: ['vs-qa'], maxRounds: 1, project: 'p' } };
+  assert.deepEqual(migrate({ projects: {}, chains }).chains, chains);
 });
