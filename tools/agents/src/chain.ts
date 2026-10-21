@@ -4,8 +4,8 @@
 export const PLAN_HEADING = '## VoidShift plan';
 
 export const LABELS = {
-  trigger: 'vs-plan',
   working: 'vs-working',
+  changes: 'vs-changes-requested',
   verified: 'vs-qa-verified',
   parked: 'vs-parked',
   dev: (round: number) => `vs-dev-v${round}`,

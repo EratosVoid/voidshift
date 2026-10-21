@@ -3,7 +3,7 @@ import { existsSync, lstatSync, mkdirSync, readdirSync, readlinkSync, rmSync, sy
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { agentsDir, lookup, readAgentsConfig, writeAgentsConfig } from './config.ts';
+import { STEPS, agentsDir, allChains, describeChain, readAgentsConfig, writeAgentsConfig, type AgentsConfig, type StepId } from './config.ts';
 import { looksLikeLinearKey, readLinearKey, storeLinearKey } from './keychain.ts';
 import { runnerLoaded, startRunner, stopRunner } from './launchd.ts';
 import { createLinear } from './linear.ts';
@@ -141,11 +141,82 @@ function linear() {
   return createLinear(key);
 }
 
+// Named local repos the chains run in. Triggers point at them by name.
+async function setupProjects(ui: Ui, config: AgentsConfig, log: (l: string) => void): Promise<void> {
+  const names = Object.keys(config.projects);
+  if (names.length) log(`Projects: ${names.map((n) => `${n} (${tilde(config.projects[n]!.path)})`).join(', ')}`);
+  else log('A project is a repo on this Mac where agents do the work. Add one now; triggers point at it.');
+  let more = names.length === 0 || (await ui.confirm('Add a project?', false));
+  while (more) {
+    const cwd = process.cwd();
+    const path = resolve(
+      expandHome(
+        (
+          await ui.text('Where is the repo?', {
+            initial: existsSync(join(cwd, '.git')) ? cwd : undefined,
+            placeholder: '~/code/my-app',
+            validate: (v) => (existsSync(join(expandHome(v.trim()), '.git')) ? undefined : 'Not a git repository'),
+          })
+        ).trim(),
+      ),
+    );
+    const name = (await ui.text('Name for this project', { initial: path.split('/').pop(), validate: (v) => (v.trim() ? undefined : 'Required') })).trim();
+    const url = (await ui.text('URL where the app runs, for the browser check (leave empty to skip)', { placeholder: 'http://localhost:3000' })).trim();
+    config.projects[name] = { path, uiUrl: url || undefined };
+    log(`Project ${name}: ${tilde(path)}${url ? `, app at ${url}` : ''}`);
+    more = await ui.confirm('Add another project?', false);
+  }
+}
+
+// Chains are agents in order. VoidShift ships some; custom ones are built here.
+async function setupChains(ui: Ui, config: AgentsConfig, log: (l: string) => void): Promise<void> {
+  for (const [name, chain] of Object.entries(allChains(config))) log(`Chain ${name}: ${describeChain(chain)}`);
+  while (await ui.confirm('Build a new chain?', false)) {
+    const name = (await ui.text('Name for the chain', { placeholder: 'build-fast', validate: (v) => (v.trim() && !allChains(config)[v.trim()] ? undefined : 'Pick a new name') })).trim();
+    const steps: StepId[] = [];
+    for (;;) {
+      const DONE = '__done__';
+      const pick = await ui.select<StepId | typeof DONE>(
+        steps.length ? `So far: ${steps.map((s) => STEPS[s].label).join(' → ')}. Add a step:` : 'First step:',
+        [
+          ...(Object.keys(STEPS) as StepId[]).map((id) => ({ value: id, label: STEPS[id].label, hint: STEPS[id].hint })),
+          ...(steps.length ? [{ value: DONE as typeof DONE, label: 'Done' }] : []),
+        ],
+      );
+      if (pick === DONE) break;
+      steps.push(pick);
+    }
+    const work = steps.some((s) => STEPS[s].kind === 'work');
+    const rounds = work
+      ? Number(await ui.text('If a check fails, how many rounds back to Dev before parking?', { initial: '3', validate: (v) => (/^[1-9]$/.test(v) ? undefined : '1 to 9') }))
+      : 1;
+    config.chains[name] = { steps, maxRounds: rounds };
+    log(`Chain ${name}: ${describeChain(config.chains[name]!)}`);
+  }
+}
+
+// A trigger: cards in this Linear team with this label run this chain in this project.
+async function setupTriggers(ui: Ui, config: AgentsConfig, teams: { key: string; name: string }[], log: (l: string) => void): Promise<void> {
+  for (const t of config.triggers) log(`Trigger: ${t.team} + ${t.label} → ${t.chain} in ${t.project}`);
+  const projects = Object.keys(config.projects);
+  if (!projects.length) return;
+  if (!config.triggers.length) log('A trigger starts a chain: your cards in a Linear team that carry a label.');
+  let more = config.triggers.length === 0 || (await ui.confirm('Add a trigger?', false));
+  while (more) {
+    const team = await ui.select('Linear team', teams.map((t) => ({ value: t.key, label: `${t.key}  ${t.name}` })));
+    const label = (await ui.text('Label that starts it', { initial: 'vs-plan', validate: (v) => (v.trim() ? undefined : 'Required') })).trim();
+    const chains = allChains(config);
+    const chain = await ui.select('Chain to run', Object.keys(chains).map((n) => ({ value: n, label: n, hint: describeChain(chains[n]!) })), 'build');
+    const project = projects.length === 1 ? projects[0]! : await ui.select('In which project?', projects.map((n) => ({ value: n, label: n, hint: tilde(config.projects[n]!.path) })));
+    config.triggers = config.triggers.filter((t) => !(t.team === team && t.label === label));
+    config.triggers.push({ source: 'linear', team, label, chain, project });
+    log(`Trigger: ${team} + ${label} → ${chain} in ${project}`);
+    more = await ui.confirm('Add another trigger?', false);
+  }
+}
+
 const usage = `voidshift agents <command>
-  status                     What is set up and running
-  repo <TEAM|Project> <path> Map Linear cards to a local repo
-  ui <TEAM|Project> <url>    Where the app runs, for the browser check
-  engine <claude|codex>      Which agent CLI runs the background chain
+  status                     Triggers, chains, projects and the runner
   key                        Store or replace the Linear API key
   run [CARD]                 Run the chain once now, in this terminal
   start | stop               Start or stop the background runner`;
@@ -184,33 +255,12 @@ const agents: Tool = {
       if (!(await setupKey(ui))) throw new Error('Linear is not connected. Run voidshift again to retry.');
     }
 
-    const teams = await linear().teams();
-    if (!Object.keys(config.repos).length) {
-      ctx.log('Background agents build Linear cards in your local repos. Link each Linear team to the repo its cards change.');
-    }
-    let more = Object.keys(config.repos).length === 0 || (await ui.confirm('Link another Linear team to a repo?', false));
-    while (more) {
-      const team = await ui.select(
-        'Which Linear team?',
-        teams.map((t) => ({ value: t.key, label: `${t.key}  ${t.name}`, hint: config.repos[t.key] ? `now ${tilde(config.repos[t.key]!)}` : undefined })),
-      );
-      const cwd = process.cwd();
-      const path = expandHome(
-        (
-          await ui.text(`Where is the repo for ${team} cards on this Mac?`, {
-            initial: config.repos[team] ?? (existsSync(join(cwd, '.git')) ? cwd : undefined),
-            placeholder: '~/code/my-app',
-            validate: (v) => (existsSync(join(expandHome(v.trim()), '.git')) ? undefined : 'Not a git repository'),
-          })
-        ).trim(),
-      );
-      config.repos[team] = resolve(path);
-      ctx.log(`${team} cards will be built in ${tilde(resolve(path))}`);
-      more = await ui.confirm('Link another Linear team to a repo?', false);
-    }
+    await setupProjects(ui, config, ctx.log);
+    await setupChains(ui, config, ctx.log);
+    await setupTriggers(ui, config, await linear().teams(), ctx.log);
     writeAgentsConfig(ctx.configDir, config);
 
-    if (await ui.confirm('Start the background runner now? It checks Linear every minute for your cards labelled vs-plan.')) {
+    if (config.triggers.length && (await ui.confirm('Start the background runner now? It checks Linear every minute for cards matching your triggers.'))) {
       const ok = startRunner(ctx.home, [...ctx.selfCommand, 'agents', 'tick'], join(agentsDir(ctx.configDir), 'runner.log'));
       ctx.log(ok ? 'Runner started.' : 'Could not start the runner. Try voidshift agents start.');
     }
@@ -242,11 +292,14 @@ const agents: Tool = {
       checks.push({ name: 'Linear', status: 'fail', detail: (err as Error).message, fix: 'voidshift agents key' });
     }
     const config = readAgentsConfig(ctx.configDir);
-    const repos = Object.keys(config.repos).length;
+    const chains = allChains(config);
+    const broken = config.triggers.filter((t) => !chains[t.chain] || !config.projects[t.project] || !existsSync(join(config.projects[t.project]!.path, '.git')));
     checks.push(
-      repos
-        ? { name: 'agent repos', status: 'ok', detail: `${repos} mapped` }
-        : { name: 'agent repos', status: 'warn', detail: 'none mapped', fix: 'voidshift agents repo <TEAM> <path>' },
+      !config.triggers.length
+        ? { name: 'agent triggers', status: 'warn', detail: 'none yet', fix: 'voidshift' }
+        : broken.length
+          ? { name: 'agent triggers', status: 'fail', detail: `${broken.map((t) => `${t.team}+${t.label}`).join(', ')} point at a missing chain or project`, fix: 'voidshift' }
+          : { name: 'agent triggers', status: 'ok', detail: `${config.triggers.length} active` },
     );
     checks.push(
       runnerLoaded()
@@ -259,56 +312,12 @@ const agents: Tool = {
   commands: {
     async status(_args, ctx) {
       const c = readAgentsConfig(ctx.configDir);
-      ctx.log(`Engine: ${c.engine}  models: dev ${c.models.dev ?? 'default'}, review ${c.models.review ?? 'default'}, ui ${c.models.ui ?? 'default'}`);
-      ctx.log(`Rounds before parking: ${c.maxRounds}`);
-      ctx.log(`Repos: ${Object.entries(c.repos).map(([k, v]) => `${k} -> ${v}`).join(', ') || 'none'}`);
-      ctx.log(`Browser check URLs: ${Object.entries(c.uiUrls).map(([k, v]) => `${k} -> ${v}`).join(', ') || 'none (browser QA skipped)'}`);
+      ctx.log(`Engine: ${c.engine}`);
+      for (const [n, p] of Object.entries(c.projects)) ctx.log(`Project ${n}: ${tilde(p.path)}${p.uiUrl ? `, app at ${p.uiUrl}` : ''}`);
+      for (const [n, ch] of Object.entries(allChains(c))) ctx.log(`Chain ${n}: ${describeChain(ch)}`);
+      for (const t of c.triggers) ctx.log(`Trigger: ${t.team} + ${t.label} → ${t.chain} in ${t.project}`);
+      if (!c.triggers.length) ctx.log('No triggers yet. Run voidshift to add one.');
       ctx.log(`Runner: ${runnerLoaded() ? 'running' : 'stopped'}${existsSync(join(agentsDir(ctx.configDir), 'runner.lock')) ? ', working on a card now' : ''}`);
-      return 0;
-    },
-
-    async repo(args, ctx) {
-      const [key, path] = args;
-      if (!key || !path) {
-        ctx.log('usage: voidshift agents repo <TEAM|Project> <path>');
-        return 2;
-      }
-      const full = resolve(path);
-      if (!existsSync(join(full, '.git'))) {
-        ctx.log(`${full} is not a git repository.`);
-        return 1;
-      }
-      const c = readAgentsConfig(ctx.configDir);
-      c.repos[key] = full;
-      writeAgentsConfig(ctx.configDir, c);
-      ctx.log(`${key} cards now build in ${full}`);
-      return 0;
-    },
-
-    async ui(args, ctx) {
-      const [key, url] = args;
-      if (!key || !url || !/^https?:\/\//.test(url)) {
-        ctx.log('usage: voidshift agents ui <TEAM|Project> <http://url>');
-        return 2;
-      }
-      const c = readAgentsConfig(ctx.configDir);
-      c.uiUrls[key] = url;
-      writeAgentsConfig(ctx.configDir, c);
-      ctx.log(`Browser QA for ${key} will use ${url}`);
-      return 0;
-    },
-
-    async engine(args, ctx) {
-      const engine = args[0];
-      if (engine !== 'claude' && engine !== 'codex') {
-        ctx.log('usage: voidshift agents engine <claude|codex>');
-        return 2;
-      }
-      const c = readAgentsConfig(ctx.configDir);
-      c.engine = engine;
-      if (engine === 'codex') c.models = {};
-      writeAgentsConfig(ctx.configDir, c);
-      ctx.log(`Background chain now runs on ${engine}.`);
       return 0;
     },
 
@@ -331,12 +340,12 @@ const agents: Tool = {
     },
 
     async start(_args, ctx) {
-      if (!Object.keys(readAgentsConfig(ctx.configDir).repos).length) {
-        ctx.log('Map a repo first: voidshift agents repo <TEAM> <path>');
+      if (!readAgentsConfig(ctx.configDir).triggers.length) {
+        ctx.log('Add a trigger first: run voidshift.');
         return 1;
       }
       const ok = startRunner(ctx.home, [...ctx.selfCommand, 'agents', 'tick'], join(agentsDir(ctx.configDir), 'runner.log'));
-      ctx.log(ok ? 'Runner started. It checks Linear every minute for your cards labelled vs-plan.' : 'Could not start the runner.');
+      ctx.log(ok ? 'Runner started. It checks Linear every minute for cards matching your triggers.' : 'Could not start the runner.');
       return ok ? 0 : 1;
     },
 
@@ -353,5 +362,4 @@ const agents: Tool = {
   },
 };
 
-export { lookup };
 export default agents;
