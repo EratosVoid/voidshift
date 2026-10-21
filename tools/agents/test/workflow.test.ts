@@ -39,6 +39,11 @@ test('findings only carry FIX steps', () => {
   assert.doesNotMatch(f, /green/);
 });
 
+test('plain "## Plan" heading is read too', () => {
+  assert.equal(latestPlan([{ body: '## Plan\n\nsteps', createdAt: '2026-10-21T10:00:00Z' }]), 'steps');
+  assert.equal(latestPlan([{ body: '## Planning notes\nx', createdAt: '2026-10-21T10:00:00Z' }]), null);
+});
+
 test('latest plan comment wins, others ignored', () => {
   const plan = latestPlan([
     { body: '## VoidShift plan\nold', createdAt: '2026-10-20T10:00:00Z' },

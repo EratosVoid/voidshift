@@ -1,7 +1,9 @@
 // The build workflow and the pure decisions around it. The runner does the I/O;
 // everything here is testable without Linear, git or an agent.
 
-export const PLAN_HEADING = '## VoidShift plan';
+export const PLAN_HEADING = '## Plan';
+// Plans posted before 0.1.5 used this heading; still read them.
+const OLD_PLAN_HEADING = '## VoidShift plan';
 
 export const LABELS = {
   working: 'vs-working',
@@ -54,11 +56,15 @@ export function findingsFor(results: StepResult[]): string {
 }
 
 export function latestPlan(comments: { body: string; createdAt: string }[]): string | null {
+  const headingOf = (body: string) => {
+    const first = body.trimStart().split('\n', 1)[0]!.trim();
+    return first === PLAN_HEADING || first === OLD_PLAN_HEADING ? first : null;
+  };
   const plans = comments
-    .filter((c) => c.body.trimStart().startsWith(PLAN_HEADING))
+    .filter((c) => headingOf(c.body))
     .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
   const last = plans.at(-1);
-  return last ? last.body.trimStart().slice(PLAN_HEADING.length).trim() : null;
+  return last ? last.body.trimStart().slice(headingOf(last.body)!.length).trim() : null;
 }
 
 // Strip the frontmatter from a SKILL.md so the body can be inlined.

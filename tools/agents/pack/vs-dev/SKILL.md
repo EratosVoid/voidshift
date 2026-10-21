@@ -1,6 +1,6 @@
 ---
 name: vs-dev
-description: Implement a published VoidShift plan on its branch. Run by the VoidShift background runner, not by hand.
+description: Implement a published plan on its branch. Run by the background runner, not by hand.
 ---
 
 # Implement a plan

@@ -43,7 +43,7 @@ const statusLabel = (l: string) =>
 
 const UNATTENDED = `# Running unattended
 
-You are one step in a VoidShift workflow. Nobody can answer questions and the
+You are one step in a workflow. Nobody can answer questions and the
 Linear connection is not available: the card and any plan are included above.
 Do not write plan files; return your output as your final message. Make the
 call the code supports and state it.`;
@@ -63,7 +63,7 @@ export async function runCard(card: Card, trigger: Trigger, workflow: Workflow, 
 
   async function park(reason: string): Promise<'parked'> {
     say(`parked: ${reason}`);
-    await linear.comment(card, `**VoidShift parked this card.** ${reason}\n\nFix the cause, then add \`${trigger.label}\` again to retry.`);
+    await linear.comment(card, `**Parked:** ${reason}\n\nFix the cause, then add \`${trigger.label}\` again to retry.`);
     await linear.setLabels(card, withLabels(card, (l) => l === trigger.label || l === LABELS.working, [LABELS.parked]));
     return 'parked';
   }
@@ -74,7 +74,7 @@ export async function runCard(card: Card, trigger: Trigger, workflow: Workflow, 
     const firstPlan = steps.indexOf('vs-plan');
     const needsPlan = steps.findIndex((s) => s === 'vs-dev' || s === 'vs-plan-review');
     if (!plan && needsPlan >= 0 && (firstPlan < 0 || firstPlan > needsPlan)) {
-      throw new Park('No comment starting with "## VoidShift plan" was found. Publish a plan first, or start the workflow with Plan.');
+      throw new Park('No plan comment (starting with "## Plan") was found. Publish a plan first, or start the workflow with Plan.');
     }
 
     await linear.setLabels(card, withLabels(card, (l) => l === trigger.label || statusLabel(l), [LABELS.working]));
@@ -127,7 +127,7 @@ export async function runCard(card: Card, trigger: Trigger, workflow: Workflow, 
           continue;
         }
         const notes = findingsFor(results);
-        await linear.comment(card, `**VoidShift: changes needed.**\n\n${summary}\n\n${notes}`);
+        await linear.comment(card, `**Changes needed (round ${runs.qa}).**\n\n${summary}\n\n${notes}`);
         const target = fixTarget(steps, start, isProducer);
         if (target < 0) {
           await linear.setLabels(card, withLabels(card, (l) => l === LABELS.working, [LABELS.changes]));
@@ -162,7 +162,7 @@ export async function runCard(card: Card, trigger: Trigger, workflow: Workflow, 
         if (result.status === 'blocked') throw new Park(`The dev agent stopped: ${result.reason}`);
         if (commitsAhead(worktree, base) === 0) throw new Park('The dev agent made no commits.');
         push(worktree, card.branchName);
-        prUrl = ensureDraftPr(worktree, card.branchName, base, `${card.identifier}: ${card.title}`, `${card.url}\n\nOpened by VoidShift.`);
+        prUrl = ensureDraftPr(worktree, card.branchName, base, `${card.identifier}: ${card.title}`, card.url);
         runs.dev++;
         await linear.setLabels(card, withLabels(card, () => false, [LABELS.dev(runs.dev)]));
       }
@@ -176,7 +176,7 @@ export async function runCard(card: Card, trigger: Trigger, workflow: Workflow, 
       moved = await linear.moveTo(card, config.reviewState);
     }
     await linear.setLabels(card, withLabels(card, (l) => l === LABELS.working, [LABELS.verified]));
-    await linear.comment(card, `**VoidShift: every step passed.**${prUrl ? `\n\nPR ready for review: ${prUrl}` : ''}${hasWork(workflow) && !moved ? `\n\n(No "${config.reviewState}" state on this team, so the card was not moved.)` : ''}`);
+    await linear.comment(card, `**All checks passed.**${prUrl ? ` PR ready: ${prUrl}` : ''}${hasWork(workflow) && !moved ? `\n\n(No "${config.reviewState}" state on this team, so the card was not moved.)` : ''}`);
     say('verified');
     return 'verified';
   } catch (err) {

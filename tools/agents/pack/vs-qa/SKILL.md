@@ -1,6 +1,6 @@
 ---
 name: vs-qa
-description: QA a VoidShift branch against its card and plan, CI first, then code review, then a usability check in a headless browser. Use when the user asks to QA a branch or card, or runs /vs-qa with a card id.
+description: QA a branch against its card and plan, CI first, then code review, then a usability check in a headless browser. Use when the user asks to QA a branch or card, or runs /vs-qa with a card id.
 ---
 
 # QA

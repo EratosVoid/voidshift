@@ -91,6 +91,9 @@ The plan file holds the detail. In the chat, keep it short and plain:
 
 ## Plan shape (the file)
 
+Start straight at Understanding. Do not repeat the card id or title; the card
+already shows them.
+
 Length follows the change: under 350 words for a small one, never padded.
 
 **Understanding.** Two to four sentences: what the card asks, what it got
@@ -121,7 +124,7 @@ anything a human must click.
 - No em dashes or en dashes.
 - No narration of process. State findings.
 
-## When VoidShift runs you in a workflow
+## When you run inside a workflow
 
 The card is in the prompt and nobody can answer. Skip the Linear fetch, the
 questions and step 5 (the workflow runs its own review): pick the sensible default for anything open and state it under

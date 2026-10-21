@@ -1,6 +1,6 @@
 ---
 name: vs-publish
-description: Publish an approved VoidShift plan to its Linear card and hand the card to the background agents. Use when the user says the plan is approved, asks to publish a plan, or runs /vs-publish with a card id.
+description: Publish an approved plan to its Linear card and hand the card to the background agents. Use when the user says the plan is approved, asks to publish a plan, or runs /vs-publish with a card id.
 ---
 
 # Publish a plan
@@ -14,7 +14,7 @@ the background agents. Do every step; stop and report if one fails.
    first line is exactly:
 
    ```
-   ## VoidShift plan
+   ## Plan
    ```
 
    followed by the plan unchanged. The background agents find the plan by

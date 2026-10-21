@@ -1,6 +1,6 @@
 ---
 name: vs-plan-review
-description: Review a VoidShift plan against the code before it is published. Use when the user asks to review a plan, check a plan, or runs /vs-plan-review with a card id.
+description: Review a plan against the code before it is published. Use when the user asks to review a plan, check a plan, or runs /vs-plan-review with a card id.
 ---
 
 # Review a plan
@@ -57,7 +57,7 @@ fixes to the plan file.
 - No em dashes or en dashes.
 - No narration of process. State findings.
 
-## When VoidShift runs you in a workflow
+## When you run inside a workflow
 
 The card and the plan are in the prompt; read them there instead of the plan
 file and Linear. Do not offer to edit anything. End with the VERDICT line.
