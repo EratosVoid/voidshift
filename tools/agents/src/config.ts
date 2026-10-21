@@ -15,12 +15,12 @@ export const STEPS: Record<StepId, { label: string; kind: 'work' | 'check'; hint
 
 // The agents in the pack, as setup describes them.
 export const AGENTS: Record<string, { label: string; hint: string; hidden?: boolean }> = {
-  'vs-plan': { label: 'Plan', hint: 'you run it: plans a card against the code' },
-  'vs-plan-review': { label: 'Plan review', hint: 'you run it: checks a plan before it is published' },
-  'vs-publish': { label: 'Publish', hint: 'you run it: posts the plan to Linear and hands the card to a chain' },
-  'vs-dev': { label: 'Dev', hint: 'in chains: implements the plan and opens a draft PR' },
-  'vs-qa-review': { label: 'Code review', hint: 'in chains: reviews the change against the card and plan' },
-  'vs-qa-ui': { label: 'Browser check', hint: 'in chains: clicks through the app', hidden: true },
+  'vs-plan': { label: 'Plan', hint: 'plans a card against the code' },
+  'vs-plan-review': { label: 'Plan review', hint: 'checks a plan before it is published' },
+  'vs-publish': { label: 'Publish', hint: 'posts the plan to Linear and hands the card over' },
+  'vs-dev': { label: 'Dev', hint: 'implements the plan and opens a draft PR' },
+  'vs-qa-review': { label: 'Code review', hint: 'reviews the change against the card and plan' },
+  'vs-qa-ui': { label: 'Browser check', hint: 'clicks through the app', hidden: true },
 };
 
 export const visibleAgents = () => Object.keys(AGENTS).filter((a) => !AGENTS[a]!.hidden);
