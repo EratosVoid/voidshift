@@ -36,5 +36,9 @@ jobs:
       - name: Publish
         run: |
           for dir in tools/awake tools/agents tools/memory packages/cli; do
+            name=$(node -p "require('./$dir/package.json').name")
+            v=$(node -p "require('./$dir/package.json').version")
+            # A new package is published by hand once; skip what is already out.
+            if npm view "$name@$v" version >/dev/null 2>&1; then echo "$name@$v is already published"; continue; fi
             (cd "$dir" && npm publish)
           done
