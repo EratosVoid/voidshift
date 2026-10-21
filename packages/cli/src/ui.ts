@@ -29,12 +29,13 @@ export const ui: Ui = {
   async multiselect<T extends string>(message: string, choices: Choice<T>[], initial: T[] = []) {
     return unwrap(await p.multiselect<T>({ message, options: choices as never, initialValues: initial, required: false }));
   },
-  async search<T extends string>(message: string, choices: Choice<T>[], placeholder?: string) {
+  async search<T extends string>(message: string, choices: Choice<T>[], placeholder?: string, initial?: T) {
     return unwrap(
       await p.autocomplete<T>({
         message,
         options: choices as never,
         placeholder,
+        initialValue: initial,
         maxItems: 8,
         filter: (q, o) => `${o.label ?? ''} ${o.hint ?? ''}`.toLowerCase().includes(q.toLowerCase()),
       }),
@@ -43,4 +44,42 @@ export const ui: Ui = {
   async path(message, o = {}) {
     return unwrap(await p.path({ message, directory: true, initialValue: o.initial, validate: o.validate ? (v) => o.validate!(v ?? '') : undefined }));
   },
+};
+
+const shown = (v: string | boolean | string[], choices?: Choice<string>[]) => {
+  const label = (x: string) => choices?.find((c) => c.value === x)?.label ?? x;
+  if (typeof v === 'boolean') return v ? 'Yes' : 'No';
+  return Array.isArray(v) ? v.map(label).join(', ') || 'none' : label(v);
+};
+
+// `voidshift --defaults`: every prompt with a default takes it and says so.
+// Prompts with no sensible default (a secret, a path) still ask.
+export const defaultsUi: Ui = {
+  info: ui.info,
+  warn: ui.warn,
+  async text(message, o = {}) {
+    if (o.initial === undefined || o.validate?.(o.initial)) return ui.text(message, o);
+    p.log.info(`${message}  ${o.initial}`);
+    return o.initial;
+  },
+  secret: ui.secret,
+  async confirm(message, initial = true) {
+    p.log.info(`${message}  ${shown(initial)}`);
+    return initial;
+  },
+  async select<T extends string>(message: string, choices: Choice<T>[], initial?: T) {
+    if (initial === undefined || !choices.some((c) => c.value === initial)) return ui.select(message, choices, initial);
+    p.log.info(`${message}  ${shown(initial, choices)}`);
+    return initial;
+  },
+  async multiselect<T extends string>(message: string, choices: Choice<T>[], initial: T[] = []) {
+    p.log.info(`${message}  ${shown(initial, choices)}`);
+    return initial;
+  },
+  async search<T extends string>(message: string, choices: Choice<T>[], placeholder?: string, initial?: T) {
+    if (initial === undefined || !choices.some((c) => c.value === initial)) return ui.search(message, choices, placeholder, initial);
+    p.log.info(`${message}  ${shown(initial, choices)}`);
+    return initial;
+  },
+  path: ui.path,
 };

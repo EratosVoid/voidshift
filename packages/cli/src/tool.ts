@@ -28,12 +28,14 @@ export interface Ui {
   select<T extends string>(message: string, choices: Choice<T>[], initial?: T): Promise<T>;
   multiselect<T extends string>(message: string, choices: Choice<T>[], initial?: T[]): Promise<T[]>;
   // A list filtered as the user types.
-  search<T extends string>(message: string, choices: Choice<T>[], placeholder?: string): Promise<T>;
+  search<T extends string>(message: string, choices: Choice<T>[], placeholder?: string, initial?: T): Promise<T>;
   // A path field that suggests folders as the user types.
   path(message: string, o?: { initial?: string; validate?: (v: string) => string | undefined }): Promise<string>;
 }
 
 export interface ToolContext {
+  // True for `voidshift --defaults`: prompts take their default without asking.
+  defaults: boolean;
   home: string;
   configDir: string;
   // How to invoke this CLI again, e.g. from a launchd job.

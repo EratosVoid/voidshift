@@ -8,8 +8,8 @@ import { formatChecks } from './doctor.ts';
 
 // `voidshift` with no arguments: check the machine, pick tools, configure
 // each one. Safe to run again; it starts from what is already set up.
-export async function setup(): Promise<number> {
-  p.intro('VoidShift');
+export async function setup(defaults = false): Promise<number> {
+  p.intro(defaults ? 'VoidShift (defaults)' : 'VoidShift');
 
   const base = baseChecks(process.platform, process.version, run);
   const line = base.map((c) => `${c.status === 'ok' ? '✓' : c.status === 'warn' ? '!' : '✗'} ${c.name}`).join('   ');
@@ -21,21 +21,25 @@ export async function setup(): Promise<number> {
   p.log.info(line);
   for (const c of base.filter((c) => c.status === 'warn')) p.log.warn(`${c.name}: ${c.detail}. ${c.fix ?? ''}`);
 
-  const ctx = context(true);
+  const ctx = context(true, defaults);
   const config = readConfig();
   try {
-    const picked = await p.multiselect<string>({
-      message: 'Which tools do you want?',
-      options: registry.map((t) => ({
-        value: t.name,
-        label: t.name,
-        hint: t.status === 'planned' ? `${t.summary} (coming soon)` : t.summary,
-        disabled: t.status === 'planned',
-      })),
-      initialValues: config.tools,
-      required: false,
-    });
+    const available = registry.filter((t) => t.status !== 'planned').map((t) => t.name);
+    const picked = defaults
+      ? [...new Set([...config.tools, ...available])]
+      : await p.multiselect<string>({
+          message: 'Which tools do you want?',
+          options: registry.map((t) => ({
+            value: t.name,
+            label: t.name,
+            hint: t.status === 'planned' ? `${t.summary} (coming soon)` : t.summary,
+            disabled: t.status === 'planned',
+          })),
+          initialValues: config.tools,
+          required: false,
+        });
     if (p.isCancel(picked)) throw (p.cancel('Setup cancelled. Nothing was changed.'), new Cancelled());
+    if (defaults) p.log.info(`Which tools do you want?  ${picked.join(', ')}`);
 
     for (const name of config.tools.filter((t) => !picked.includes(t))) {
       const entry = registry.find((t) => t.name === name);

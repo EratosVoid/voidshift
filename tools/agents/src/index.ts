@@ -166,6 +166,7 @@ async function setupProjects(ui: Ui, config: AgentsConfig, log: (l: string) => v
         { value: TYPE, label: 'Enter a path...', hint: 'not in the list' },
       ],
       'repo name',
+      repos.includes(resolve(process.cwd())) ? resolve(process.cwd()) : undefined,
     );
     const path = resolve(expandHome(picked === TYPE ? (await ui.path('Repo path', { initial: homedir() + '/', validate: isRepo })).trim() : picked));
     const name = (await ui.text('Name for this project', { initial: path.split('/').pop(), validate: (v) => (v.trim() ? undefined : 'Required') })).trim();
@@ -197,7 +198,8 @@ async function pickSteps(ui: Ui, config: AgentsConfig): Promise<StepId[]> {
 }
 
 // A workflow: what starts it, the steps it runs, and the project it runs in.
-async function setupWorkflows(ui: Ui, config: AgentsConfig, teams: { key: string; name: string }[], log: (l: string) => void): Promise<void> {
+async function setupWorkflows(ui: Ui, config: AgentsConfig, teams: { key: string; name: string; mine: boolean }[], log: (l: string) => void): Promise<void> {
+  const myTeams = teams.filter((t) => t.mine);
   log(
     [
       'A workflow starts when one of your Linear cards gets a label, then runs agents',
@@ -216,7 +218,8 @@ async function setupWorkflows(ui: Ui, config: AgentsConfig, teams: { key: string
     do {
       const team = await ui.select(
         triggers.length ? 'Also start for cards in which Linear team?' : 'Starts when a card in which Linear team...',
-        teams.map((t) => ({ value: t.key, label: `${t.key}  ${t.name}` })),
+        teams.map((t) => ({ value: t.key, label: `${t.key}  ${t.name}`, hint: t.mine ? 'your team' : undefined })),
+        myTeams.length === 1 ? myTeams[0]!.key : undefined,
       );
       const label = (await ui.text('...gets which label?', { initial: 'vs-plan', validate: (v) => (v.trim() ? undefined : 'Required') })).trim();
       triggers.push({ source: 'linear', team, label });

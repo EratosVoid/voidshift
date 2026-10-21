@@ -9,6 +9,7 @@ const help = `voidshift: one CLI for the Void dev tools
 
 Usage
   voidshift                   Set up: pick your tools and configure them
+  voidshift --defaults        Set up with the defaults, asking only what has none
   voidshift doctor            Check this Mac is ready
   voidshift tools             List available tools
   voidshift add <tool>        Install and set up a tool
@@ -28,7 +29,8 @@ function version(): string {
 }
 
 async function main(argv: string[]): Promise<number> {
-  const [cmd, ...rest] = argv;
+  const defaults = argv.includes('--defaults');
+  const [cmd, ...rest] = argv.filter((a) => a !== '--defaults');
   switch (cmd) {
     case 'doctor':
       return doctor();
@@ -43,11 +45,11 @@ async function main(argv: string[]): Promise<number> {
       console.log(version());
       return 0;
     case undefined:
-      if (process.stdin.isTTY && process.stdout.isTTY) return setup();
+      if (process.stdin.isTTY && process.stdout.isTTY) return setup(defaults);
       console.log(help);
       return 0;
     case 'setup':
-      return setup();
+      return setup(defaults);
     case '-h':
     case '--help':
     case 'help':

@@ -95,9 +95,12 @@ export function createLinear(apiKey: string) {
       return d.viewer;
     },
 
-    async teams(): Promise<{ key: string; name: string }[]> {
-      const d = await gql('teams', 'query { teams(first: 100) { nodes { key name } } }');
-      return d?.teams?.nodes ?? [];
+    // Every team, with whether I am a member, members first.
+    async teams(): Promise<{ key: string; name: string; mine: boolean }[]> {
+      const d = await gql('teams', 'query { teams(first: 100) { nodes { key name } } viewer { teams(first: 100) { nodes { key } } } }');
+      const mine = new Set((d?.viewer?.teams?.nodes ?? []).map((t: { key: string }) => t.key));
+      const all: { key: string; name: string }[] = d?.teams?.nodes ?? [];
+      return all.map((t) => ({ ...t, mine: mine.has(t.key) })).sort((a, b) => Number(b.mine) - Number(a.mine));
     },
 
     // My cards carrying the trigger label.
