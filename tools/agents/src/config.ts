@@ -42,8 +42,6 @@ export interface Project {
   path: string;
   // Branch pull requests go into; the repo's default branch when unset.
   base?: string;
-  // URL where the app runs, for the browser check.
-  uiUrl?: string;
 }
 
 // A workflow starts on its triggers, runs its steps in order, in its project.
@@ -58,11 +56,13 @@ export interface Workflow {
 export interface AgentsConfig {
   engine: Engine;
   // Per step model; unset means the engine's default.
-  models: { dev?: string; review?: string; ui?: string };
+  models: { dev?: string; review?: string };
   projects: Record<string, Project>;
   workflows: Record<string, Workflow>;
   // Linear state a verified card moves to.
   reviewState: string;
+  // How long one agent step may run before it is stopped.
+  timeoutMinutes: number;
   // Config folders the agents are linked into, e.g. ~/.claude or ~/.codex.
   homes: { kind: 'claude' | 'codex'; dir: string }[];
   // Agents switched on; empty until setup has asked.
@@ -78,10 +78,11 @@ export const TEMPLATES: Record<string, { steps: StepId[]; maxRounds: number }> =
 
 export const DEFAULTS: AgentsConfig = {
   engine: 'claude',
-  models: { dev: 'opus', review: 'sonnet', ui: 'sonnet' },
+  models: { dev: 'opus', review: 'sonnet' },
   projects: {},
   workflows: {},
   reviewState: 'In Review',
+  timeoutMinutes: 45,
   homes: [],
   enabled: [],
 };
@@ -106,15 +107,19 @@ const migrateStepList = (steps: string[]): StepId[] => {
 // pointing at a workflow and a project. Both become workflows that own triggers.
 // Saved settings used to call workflows "chains".
 export function migrate(saved: Record<string, any>): Partial<AgentsConfig> {
-  const { repos, uiUrls, maxRounds: _max, triggers, chains, ...rest } = saved;
+  const { repos, uiUrls: _uiUrls, maxRounds: _max, triggers, chains, ...rest } = saved;
   const previous: Record<string, any> = saved.workflows ?? chains ?? {};
   const projects: Record<string, Project> = { ...(saved.projects ?? {}) };
   const oldTriggers: { team: string; label: string; chain: string; project: string }[] = [...(triggers ?? [])];
   for (const [team, path] of Object.entries((repos ?? {}) as Record<string, string>)) {
     const name = basename(path);
-    projects[name] = { path, uiUrl: uiUrls?.[team] };
+    projects[name] = { path };
     oldTriggers.push({ team, label: 'vs-plan', chain: 'build', project: name });
   }
+  // The browser check is gone, so its URL and model are dead settings.
+  for (const p of Object.values(projects)) delete (p as { uiUrl?: unknown }).uiUrl;
+  const models = rest.models && { ...rest.models };
+  if (models) delete models.ui;
   const workflows: Record<string, Workflow> = {};
   for (const [name, w] of Object.entries(previous)) {
     if (w.project) workflows[name] = { ...w, steps: migrateStepList(w.steps) };
@@ -129,7 +134,7 @@ export function migrate(saved: Record<string, any>): Partial<AgentsConfig> {
     workflows[name] = workflow;
   }
   const enabled = [...new Set((saved.enabled ?? []).map((a: string) => (a in RENAMED ? RENAMED[a] : a)).filter(Boolean))] as string[];
-  return { ...rest, projects, workflows, enabled };
+  return { ...rest, ...(models ? { models } : {}), projects, workflows, enabled };
 }
 
 export function readAgentsConfig(configDir: string): AgentsConfig {

@@ -27,16 +27,33 @@ export function writeMemoryConfig(configDir: string, config: MemoryConfig): void
 
 export const isVault = (dir: string) => existsSync(join(dir, 'INDEX.md'));
 
-export function countNotes(dir: string): number {
-  let n = 0;
+// Relative paths of every note: markdown files outside dot folders, except
+// the vault's own INDEX.md and CONVENTIONS.md.
+export function listNotes(dir: string, prefix = ''): string[] {
+  const out: string[] = [];
   for (const name of readdirSync(dir)) {
-    const path = join(dir, name);
     if (name.startsWith('.')) continue;
-    if (statSync(path).isDirectory()) n += countNotes(path);
-    else if (name.endsWith('.md') && !['INDEX.md', 'CONVENTIONS.md'].includes(name)) n++;
+    const rel = prefix ? `${prefix}/${name}` : name;
+    // A dangling symlink or unreadable entry is skipped, not fatal.
+    let kind: 'dir' | 'file' | null = null;
+    try {
+      const st = statSync(join(dir, name));
+      kind = st.isDirectory() ? 'dir' : st.isFile() ? 'file' : null;
+    } catch {
+      continue;
+    }
+    if (kind === 'dir') {
+      try {
+        out.push(...listNotes(join(dir, name), rel));
+      } catch {
+        // unreadable folder
+      }
+    } else if (kind === 'file' && name.endsWith('.md') && !['INDEX.md', 'CONVENTIONS.md'].includes(name)) out.push(rel);
   }
-  return n;
+  return out;
 }
+
+export const countNotes = (dir: string) => listNotes(dir).length;
 
 const INDEX = `# Memory index
 

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { match, recallContext, words } from '../src/recall.ts';
+import { match, previewContext, recallContext, words } from '../src/recall.ts';
 import { scaffold } from '../src/vault.ts';
 
 const INDEX = `# Memory index
@@ -40,4 +40,15 @@ test('scaffold never overwrites an existing vault', () => {
   const vault = mkdtempSync(join(tmpdir(), 'vault-'));
   writeFileSync(join(vault, 'INDEX.md'), INDEX);
   assert.deepEqual(scaffold(vault), ['CONVENTIONS.md']);
+});
+
+test('previewContext matches recall for a fresh session and leaves no state', () => {
+  const vault = mkdtempSync(join(tmpdir(), 'vault-'));
+  writeFileSync(join(vault, 'INDEX.md'), INDEX);
+  mkdirSync(join(vault, 'work'));
+  writeFileSync(join(vault, 'work', 'relay-base.md'), 'PRs go into tether-staging.');
+  const preview = previewContext(vault, 'relay base branch');
+  assert.equal(previewContext(vault, 'relay base branch'), preview);
+  assert.equal(recallContext(vault, 'relay base branch', `p${Date.now()}`), preview);
+  assert.equal(previewContext(vault, 'hello there'), '');
 });

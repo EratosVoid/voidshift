@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { configDir, readConfig } from '../config.ts';
+import { npm } from '../loader.ts';
 import { findTool } from '../registry.ts';
 import { CLI_PKG, cliVersion, isNewer } from '../version.ts';
 
@@ -10,8 +11,8 @@ import { CLI_PKG, cliVersion, isNewer } from '../version.ts';
 // name the previous version as latest.
 const QUIET = ['--silent', '--no-audit', '--no-fund', '--prefer-online'];
 
-export function latestVersion(pkg: string): string | null {
-  const r = spawnSync('npm', ['view', '--prefer-online', pkg, 'version'], { encoding: 'utf8', timeout: 15_000 });
+export function latestVersion(pkg: string, timeout = 15_000): string | null {
+  const r = spawnSync('npm', ['view', '--prefer-online', pkg, 'version'], { encoding: 'utf8', timeout });
   return r.status === 0 ? r.stdout.trim() || null : null;
 }
 
@@ -43,8 +44,7 @@ export async function update(): Promise<number> {
     if (!current || isNewer(latest, current)) targets.push(`${entry.pkg}@${latest}`);
   }
   if (targets.length) {
-    const r = spawnSync('npm', ['install', ...QUIET, '--prefix', join(configDir(), 'tools'), ...targets], { stdio: 'inherit' });
-    if (r.status !== 0) {
+    if (!npm(['install', ...QUIET, '--prefix', join(configDir(), 'tools'), ...targets])) {
       console.log('Tool update failed.');
       failed = true;
     }
@@ -61,23 +61,22 @@ export async function update(): Promise<number> {
   const current = cliVersion();
   const latest = latestVersion(CLI_PKG);
   if (!latest) {
-    console.log('voidshift: could not check npm');
+    console.log('vsf: could not check npm');
     failed = true;
   } else if (isNewer(latest, current)) {
     if (fromSource()) {
-      console.log(`voidshift ${latest} is out; this copy runs from source, so pull the repo instead.`);
+      console.log(`vsf ${latest} is out; this copy runs from source, so pull the repo instead.`);
     } else {
-      const r = spawnSync('npm', ['install', '-g', ...QUIET, `${CLI_PKG}@${latest}`], { stdio: 'inherit' });
-      if (r.status === 0) {
-        console.log(`voidshift ${current} → ${latest}`);
+      if (npm(['install', '-g', ...QUIET, `${CLI_PKG}@${latest}`])) {
+        console.log(`vsf ${current} → ${latest}`);
         changed = true;
       } else {
-        console.log(`voidshift: update failed. Run: npm i -g ${CLI_PKG}@latest`);
+        console.log(`vsf: update failed. Run: npm i -g ${CLI_PKG}@latest`);
         failed = true;
       }
     }
   }
 
-  if (!changed && !failed) console.log(`Already up to date (voidshift ${current}).`);
+  if (!changed && !failed) console.log(`Already up to date (vsf ${current}).`);
   return failed ? 1 : 0;
 }

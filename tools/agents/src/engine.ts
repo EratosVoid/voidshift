@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { createWriteStream, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -39,6 +39,24 @@ export function engineArgs(o: RunOptions, outFile: string): { cmd: string; args:
   return { cmd: 'codex', args };
 }
 
+// Agent processes running now, so a cancel can stop them.
+const children = new Set<ChildProcess>();
+
+// Registers a child process so stopAgents() can stop it.
+export function track(child: ChildProcess): void {
+  children.add(child);
+  child.on('close', () => children.delete(child));
+}
+
+// Asks every running agent to stop and waits up to 2 seconds for them to go,
+// then kills the rest. The caller exits right after, so nothing may linger.
+export async function stopAgents(): Promise<void> {
+  for (const c of children) c.kill('SIGTERM');
+  const deadline = Date.now() + 2000;
+  while (children.size && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+  for (const c of children) if (c.exitCode === null && c.signalCode === null) c.kill('SIGKILL');
+}
+
 // Runs one agent step with the prompt on stdin. Resolves with the agent's
 // final text; everything it prints also goes to the log file.
 export function runAgent(o: RunOptions): Promise<{ ok: boolean; output: string }> {
@@ -53,6 +71,7 @@ export function runAgent(o: RunOptions): Promise<{ ok: boolean; output: string }
     // match on the whole prompt, skill text included.
     const env = { ...process.env, VOIDSHIFT_RECALL: 'off' };
     const child = spawn(cmd, args, { cwd: o.cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
+    track(child);
     let stdout = '';
     child.stdout.on('data', (d) => {
       stdout += d;
@@ -62,11 +81,13 @@ export function runAgent(o: RunOptions): Promise<{ ok: boolean; output: string }
     const timer = setTimeout(() => child.kill('SIGTERM'), o.timeoutMs ?? 45 * 60_000);
     child.on('error', (err) => {
       clearTimeout(timer);
+      children.delete(child);
       log.end(`\n${err.message}\n`);
       resolve({ ok: false, output: err.message });
     });
     child.on('close', (code) => {
       clearTimeout(timer);
+      children.delete(child);
       log.end(`\nexit ${code}\n`);
       let output = stdout;
       if (o.engine === 'codex') {

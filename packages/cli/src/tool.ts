@@ -34,7 +34,7 @@ export interface Ui {
 }
 
 export interface ToolContext {
-  // True for `voidshift --defaults`: prompts take their default without asking.
+  // True for `vsf setup --defaults`: prompts take their default without asking.
   defaults: boolean;
   home: string;
   configDir: string;
@@ -54,4 +54,10 @@ export interface Tool {
   uninstall(ctx: ToolContext): Promise<void>;
   checks(ctx: ToolContext): Promise<Check[]>;
   commands?: Record<string, ToolCommand>;
+  // The tool's saved settings, for \`vsf config\`. write validates first and
+  // returns the problems; it only saves when there are none.
+  config?: {
+    read(configDir: string): Record<string, unknown>;
+    write(configDir: string, value: Record<string, unknown>): string[];
+  };
 }

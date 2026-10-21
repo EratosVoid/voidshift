@@ -52,7 +52,7 @@ const shown = (v: string | boolean | string[], choices?: Choice<string>[]) => {
   return Array.isArray(v) ? v.map(label).join(', ') || 'none' : label(v);
 };
 
-// `voidshift --defaults`: every prompt with a default takes it and says so.
+// `vsf setup --defaults`: every prompt with a default takes it and says so.
 // Prompts with no sensible default (a secret, a path) still ask.
 export const defaultsUi: Ui = {
   info: ui.info,

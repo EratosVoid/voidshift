@@ -22,7 +22,8 @@
   ],
   "type": "module",
   "bin": {
-    "voidshift": "dist/main.js"
+    "voidshift": "dist/main.js",
+    "vsf": "dist/main.js"
   },
   "files": [
     "dist",

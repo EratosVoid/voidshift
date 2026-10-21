@@ -20,17 +20,26 @@ export function locate(entry: ToolEntry, configDir: string): string | null {
   return null;
 }
 
+// npm runs with its output captured so it stays off the screen; on failure
+// the last lines of it are shown.
+export function npm(args: string[]): boolean {
+  const r = spawnSync('npm', args, { stdio: 'pipe', encoding: 'utf8' });
+  if (r.status === 0) return true;
+  const out = `${r.stdout ?? ''}${r.stderr ?? ''}${r.error ? r.error.message : ''}`.trim();
+  if (out) console.error(out.split('\n').slice(-20).join('\n'));
+  return false;
+}
+
 export function fetchTool(entry: ToolEntry, configDir: string): boolean {
   if (locate(entry, configDir)) return true;
-  const r = spawnSync('npm', ['install', '--silent', '--no-audit', '--no-fund', '--prefix', join(configDir, 'tools'), entry.pkg], { stdio: 'inherit' });
-  return r.status === 0 && locate(entry, configDir) !== null;
+  return npm(['install', '--silent', '--no-audit', '--no-fund', '--prefix', join(configDir, 'tools'), entry.pkg]) && locate(entry, configDir) !== null;
 }
 
 // Tools added elsewhere (or before an update) may not be downloaded on this
 // install yet, so fetch on first use rather than failing.
 export async function loadTool(entry: ToolEntry, configDir: string): Promise<Tool> {
   const path = locate(entry, configDir) ?? (fetchTool(entry, configDir) ? locate(entry, configDir) : null);
-  if (!path) throw new Error(`could not download ${entry.pkg}. Check your connection and run voidshift again.`);
+  if (!path) throw new Error(`could not download ${entry.pkg}. Check your connection and run vsf setup again.`);
   const mod = (await import(pathToFileURL(path).href)) as { default: Tool };
   return mod.default;
 }

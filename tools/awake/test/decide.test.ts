@@ -35,3 +35,15 @@ test('timer, heat and restart revert', () => {
 test('sleep re-enabled elsewhere: forget, do not fight it', () => {
   assert.equal(decide(state, { ...sys, sleepDisabled: false }, now).action, 'forget');
 });
+
+test('heat switch off skips the thermal revert', () => {
+  const hot = { ...sys, thermalSerious: true };
+  assert.equal(decide({ ...state, heat: false }, hot, now).action, 'keep');
+  assert.equal(decide({ ...state, heat: true }, hot, now).action, 'revert');
+});
+
+test('reboot switch off skips the restart revert', () => {
+  const rebooted = { ...sys, bootTime: new Date('2026-10-20T23:00:00Z') };
+  assert.equal(decide({ ...state, revertOnReboot: false }, rebooted, now).action, 'keep');
+  assert.equal(decide({ ...state, revertOnReboot: true }, rebooted, now).action, 'revert');
+});

@@ -1,5 +1,5 @@
 // Tools the CLI knows about. Each ships as its own npm package and is
-// installed on `voidshift add <name>`. Status flips to 'available' once the
+// installed on `vsf add <name>`. Status flips to 'available' once the
 // package is published.
 
 export interface ToolEntry {

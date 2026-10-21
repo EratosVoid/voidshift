@@ -1,5 +1,6 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { track } from './engine.ts';
 
 export interface Out {
   ok: boolean;
@@ -97,6 +98,7 @@ export function ciReport(s: CheckSummary): string {
 export function waitForChecks(worktree: string, branch: string, timeoutMs = 30 * 60_000): Promise<{ verdict: 'SHIP' | 'FIX' | 'SKIP'; report: string }> {
   return new Promise((resolve) => {
     const child = spawn('gh', ['pr', 'checks', branch, '--watch', '--interval', '30'], { cwd: worktree, stdio: ['ignore', 'pipe', 'pipe'] });
+    track(child);
     let text = '';
     child.stdout.on('data', (d) => (text += d));
     child.stderr.on('data', (d) => (text += d));

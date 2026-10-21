@@ -1,14 +1,18 @@
 # VoidShift
 
-One CLI for the Void dev tools. Install it once, run `voidshift`, pick the
-tools you want, and it sets each one up with good defaults you can change.
+One CLI for the Void dev tools. Install it once, run `vsf` (short for
+`voidshift`), pick the tools you want, and it sets each one up with good
+defaults you can change. Everything setup does can be seen and changed later
+from the command line.
 
 > Early release. macOS only for now; Windows and Linux are next.
 
 ```sh
 npm i -g @devvoid/voidshift
-voidshift              # pick tools and set them up
-voidshift --defaults   # take every default, ask only what has none
+vsf setup              # pick tools and set them up
+vsf setup --defaults   # take every default, ask only what has none
+vsf                    # what every tool is doing (first run: setup)
+vsf help               # every command; vsf <tool> help for a tool's
 ```
 
 ## Tools
@@ -22,9 +26,10 @@ voidshift --defaults   # take every default, ask only what has none
 ### awake
 
 ```sh
-voidshift awake on [--until 7am | --for 6h] [--battery 20]
-voidshift awake status
-voidshift awake off
+vsf awake on [--until 7am | --for 6h] [--battery 20]
+vsf awake status
+vsf awake logs [-f]     # what the watchdog decided
+vsf awake off
 ```
 
 Setup asks for your Mac password once to add a rule that allows only
@@ -58,9 +63,18 @@ your checkout is never touched, and labels the card as it goes (`vs-dev-v1`,
 `vs-qa-v1`, then `vs-qa-verified` or `vs-parked` with a comment saying why).
 
 ```sh
-voidshift agents status        # workflows, projects, runner
-voidshift agents run ENG-123   # run one card now, in this terminal
-voidshift agents start | stop  # the background runner
+vsf agents status                  # runner, the card in progress, parked cards
+vsf agents run ENG-123 [--from qa] # run one card now, in this terminal
+vsf agents start | stop | restart  # the background runner (stop cancels the card)
+vsf agents pause | resume          # pick up no new cards for a while
+vsf agents cancel | retry ENG-123  # stop a card, or queue a parked one again
+vsf agents runs | show ENG-123     # what happened, step by step
+vsf agents logs [ENG-123] [-f]     # the runner log, or a card's step logs
+vsf agents workflows               # workflows in the order they match
+vsf agents workflow add|edit|show|rename|move|rm
+vsf agents projects | project add|edit|show|rename|rm
+vsf agents homes | link DIR        # where the agents are installed
+vsf agents clean                   # old worktrees and run logs
 ```
 
 ### memory
@@ -73,8 +87,11 @@ decisions and their why, dead ends, things that are not obvious from the code.
 Background agents read it for each card and save what they learn.
 
 ```sh
-voidshift memory status          # the vault and where recall is on
-voidshift memory search WORDS    # notes recall would bring up
+vsf memory status          # the vault and where recall is on
+vsf memory search WORDS    # notes recall would bring up
+vsf memory try "a prompt"  # exactly what recall would add to that prompt
+vsf memory check           # notes missing from INDEX.md, broken links
+vsf memory on | off        # turn recall on or off
 ```
 
 Setup creates a vault at `~/memory` or uses one you already have. Codex asks you
@@ -91,9 +108,15 @@ to trust the recall hook once: run `/hooks` in Codex.
 - **Your config** lives in `~/.config/voidshift`.
 
 ```sh
-voidshift doctor   # check everything is set up, and whether an update is out
-voidshift update   # update VoidShift and every tool you added
-voidshift tools    # list tools
+vsf doctor                     # check everything is set up, and whether an update is out
+vsf config [tool]              # every saved setting
+vsf config set KEY VALUE       # e.g. vsf config set agents.models.dev opus
+vsf config edit [tool]         # edit settings in $EDITOR, checked before saving
+vsf update                     # update VoidShift and every tool you added
+vsf tools                      # list tools
+
+Read commands take `--json`. Workflow and project names can be shortened to
+any unique start, e.g. `tether` for `tether-relay-build`.
 ```
 
 ## Development

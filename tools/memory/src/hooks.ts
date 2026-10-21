@@ -27,6 +27,15 @@ export function otherRecall(home: Home): string | undefined {
   }
 }
 
+// The command our hook runs in this home, as stored (quoted).
+export function ourHookCommand(home: Home): string | undefined {
+  try {
+    return commands(read(hookFile(home))).find((c) => OURS.test(c));
+  } catch {
+    return undefined;
+  }
+}
+
 export function hasOurHook(home: Home): boolean {
   try {
     return commands(read(hookFile(home))).some((c) => OURS.test(c));

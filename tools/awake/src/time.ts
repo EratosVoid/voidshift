@@ -27,3 +27,14 @@ export function parseFor(input: string, now: Date): Date | null {
   if (minutes <= 0) return null;
   return new Date(now.getTime() + minutes * 60_000);
 }
+
+// Whole minutes until a time, rounded up, never negative.
+export function minutesLeft(until: Date, now: Date): number {
+  return Math.max(0, Math.ceil((until.getTime() - now.getTime()) / 60_000));
+}
+
+export function formatLeft(minutes: number): string {
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  return h && m ? `${h}h ${m}m` : h ? `${h}h` : `${m}m`;
+}

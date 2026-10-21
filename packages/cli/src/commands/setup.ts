@@ -2,11 +2,67 @@ import * as p from '@clack/prompts';
 import { baseChecks, run } from '../checks.ts';
 import { context, readConfig, writeConfig } from '../config.ts';
 import { fetchTool, loadTool } from '../loader.ts';
-import { registry } from '../registry.ts';
+import { findTool, registry, type ToolEntry } from '../registry.ts';
+import type { ToolContext } from '../tool.ts';
+import { needsTerminal, parseFlags } from './args.ts';
+import { usages } from './help.ts';
 import { Cancelled } from '../ui.ts';
 import { formatChecks } from './doctor.ts';
 
-// `voidshift` with no arguments: check the machine, pick tools, configure
+// Download, install and record one tool. Shared by `vsf setup` and `vsf setup <tool>`.
+async function installTool(entry: ToolEntry, ctx: ToolContext): Promise<boolean> {
+  if (!fetchTool(entry, ctx.configDir)) {
+    p.log.error(`Could not download ${entry.pkg}.`);
+    return false;
+  }
+  try {
+    await (await loadTool(entry, ctx.configDir)).install(ctx);
+    const tools = readConfig().tools;
+    if (!tools.includes(entry.name)) writeConfig({ ...readConfig(), tools: [...tools, entry.name] });
+    return true;
+  } catch (err) {
+    if (err instanceof Cancelled) throw err;
+    p.log.error(`${entry.name}: ${(err as Error).message}`);
+    return false;
+  }
+}
+
+// `vsf setup <tool>`: set up or reconfigure just one tool.
+async function setupTool(name: string, defaults: boolean): Promise<number> {
+  const entry = findTool(name);
+  if (!entry) {
+    console.error(`unknown tool: ${name}. Run vsf tools to see the list.`);
+    return 2;
+  }
+  if (entry.status === 'planned') {
+    console.error(`${entry.name} is not released yet.`);
+    return 1;
+  }
+  p.intro(`VoidShift: ${entry.name}`);
+  try {
+    if (!(await installTool(entry, context(true, defaults)))) return 1;
+  } catch (err) {
+    if (err instanceof Cancelled) return 1;
+    throw err;
+  }
+  p.outro(`${entry.name} is set up.`);
+  return 0;
+}
+
+export async function setupCommand(args: string[]): Promise<number> {
+  const parsed = parseFlags(args, { defaults: { type: 'boolean' } }, usages.setup!);
+  if (!parsed) return 2;
+  const [tool, extra] = parsed.positionals;
+  if (extra) {
+    console.error(`too many arguments.\n\n${usages.setup}`);
+    return 2;
+  }
+  const defaults = parsed.values.defaults === true;
+  if (!defaults && needsTerminal('setup', 'Run it in a terminal, or use vsf setup --defaults.')) return 2;
+  return tool ? setupTool(tool, defaults) : setup(defaults);
+}
+
+// `vsf setup` with no tool: check the machine, pick tools, configure
 // each one. Safe to run again; it starts from what is already set up.
 export async function setup(defaults = false): Promise<number> {
   p.intro(defaults ? 'VoidShift (defaults)' : 'VoidShift');
@@ -15,7 +71,7 @@ export async function setup(defaults = false): Promise<number> {
   const line = base.map((c) => `${c.status === 'ok' ? '✓' : c.status === 'warn' ? '!' : '✗'} ${c.name}`).join('   ');
   if (base.some((c) => c.status === 'fail')) {
     p.log.error(formatChecks(base.filter((c) => c.status !== 'ok')));
-    p.outro('Fix the items above, then run voidshift again.');
+    p.outro('Fix the items above, then run vsf setup again.');
     return 1;
   }
   p.log.info(line);
@@ -59,24 +115,13 @@ export async function setup(defaults = false): Promise<number> {
       const entry = registry.find((t) => t.name === name);
       if (!entry) continue;
       p.log.step(name);
-      if (!fetchTool(entry, ctx.configDir)) {
-        p.log.error(`Could not download ${entry.pkg}.`);
-        continue;
-      }
-      try {
-        await (await loadTool(entry, ctx.configDir)).install(ctx);
-        const tools = readConfig().tools;
-        if (!tools.includes(name)) writeConfig({ tools: [...tools, name] });
-      } catch (err) {
-        if (err instanceof Cancelled) throw err;
-        p.log.error(`${name}: ${(err as Error).message}`);
-      }
+      await installTool(entry, ctx);
     }
   } catch (err) {
     if (err instanceof Cancelled) return 1;
     throw err;
   }
 
-  p.outro('All set. Run voidshift any time to change this, or voidshift doctor to check it.');
+  p.outro('All set. Run vsf setup any time to change this, or vsf doctor to check it.');
   return 0;
 }

@@ -42,23 +42,33 @@ export function match(index: string, prompt: string, limit = MAX_NOTES): Match[]
   return found.sort((a, b) => b.score - a.score).slice(0, limit);
 }
 
-// The context block for one prompt. Each note comes in once per session.
-export function recallContext(vault: string, prompt: string, session: string): string {
+// The context block for one prompt, skipping notes in `seen`. `onUse` is told
+// about each note that went in, so callers can remember it.
+function buildContext(vault: string, prompt: string, seen: Set<string>, onUse?: (path: string) => void): string {
   const indexPath = join(vault, 'INDEX.md');
   if (!existsSync(indexPath)) return '';
-  const seenPath = join(tmpdir(), `voidshift-memory-seen-${session.replace(/[^a-zA-Z0-9-]/g, '') || 'none'}`);
-  const seen = new Set(existsSync(seenPath) ? readFileSync(seenPath, 'utf8').split('\n') : []);
   let ctx = '';
   for (const m of match(readFileSync(indexPath, 'utf8'), prompt)) {
     const note = join(vault, m.path);
     if (seen.has(m.path) || !existsSync(note)) continue;
-    appendFileSync(seenPath, `${m.path}\n`);
+    onUse?.(m.path);
     ctx += `\n--- ${m.path} ---\n${readFileSync(note, 'utf8').slice(0, MAX_NOTE_CHARS)}\n`;
     if (ctx.length >= MAX_TOTAL_CHARS) break;
   }
   if (!ctx) return '';
   return `[memory] Recalled notes from ${vault} (keyword match on the prompt). Point-in-time knowledge: check live state before relying on it. Full index: ${indexPath}\n${ctx}`;
 }
+
+// The context block for one prompt. Each note comes in once per session.
+export function recallContext(vault: string, prompt: string, session: string): string {
+  const seenPath = join(tmpdir(), `voidshift-memory-seen-${session.replace(/[^a-zA-Z0-9-]/g, '') || 'none'}`);
+  const seen = new Set(existsSync(seenPath) ? readFileSync(seenPath, 'utf8').split('\n') : []);
+  return buildContext(vault, prompt, seen, (path) => appendFileSync(seenPath, `${path}\n`));
+}
+
+// What recall would inject for a fresh session. Writes no session state, so
+// it never changes what real sessions get.
+export const previewContext = (vault: string, prompt: string) => buildContext(vault, prompt, new Set());
 
 // What Claude Code and Codex expect back from a UserPromptSubmit hook.
 export const hookOutput = (context: string) =>

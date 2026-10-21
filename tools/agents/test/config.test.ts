@@ -15,11 +15,18 @@ test('a workflow reads as trigger, steps, project', () => {
 
 test('old team-to-repo configs become a workflow that owns its trigger', () => {
   const m = migrate({ engine: 'claude', repos: { PLX: '/code/plexa' }, maxRounds: 3 });
-  assert.deepEqual(m.projects, { plexa: { path: '/code/plexa', uiUrl: undefined } });
+  assert.deepEqual(m.projects, { plexa: { path: '/code/plexa' } });
   assert.deepEqual(m.workflows, {
     'plexa-build': { triggers: [{ source: 'linear', team: 'PLX', label: 'vs-plan' }], steps: ['vs-dev', 'vs-qa'], maxRounds: 3, project: 'plexa' },
   });
   assert.equal((m as Record<string, unknown>).repos, undefined);
+});
+
+test('dead browser-check settings are dropped', () => {
+  const m = migrate({ models: { dev: 'opus', review: 'sonnet', ui: 'sonnet' }, projects: { a: { path: '/a', base: 'main', uiUrl: 'http://x' } }, uiUrls: { ENG: 'http://y' } });
+  assert.deepEqual(m.models, { dev: 'opus', review: 'sonnet' });
+  assert.deepEqual(m.projects, { a: { path: '/a', base: 'main' } });
+  assert.equal((m as Record<string, unknown>).uiUrls, undefined);
 });
 
 test('separate triggers fold into workflows, two teams on one workflow', () => {
