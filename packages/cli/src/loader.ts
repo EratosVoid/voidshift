@@ -26,9 +26,11 @@ export function fetchTool(entry: ToolEntry, configDir: string): boolean {
   return r.status === 0 && locate(entry, configDir) !== null;
 }
 
+// Tools added elsewhere (or before an update) may not be downloaded on this
+// install yet, so fetch on first use rather than failing.
 export async function loadTool(entry: ToolEntry, configDir: string): Promise<Tool> {
-  const path = locate(entry, configDir);
-  if (!path) throw new Error(`${entry.name} is not installed. Run voidshift add ${entry.name}`);
+  const path = locate(entry, configDir) ?? (fetchTool(entry, configDir) ? locate(entry, configDir) : null);
+  if (!path) throw new Error(`could not download ${entry.pkg}. Check your connection and run voidshift again.`);
   const mod = (await import(pathToFileURL(path).href)) as { default: Tool };
   return mod.default;
 }

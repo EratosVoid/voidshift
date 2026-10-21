@@ -46,7 +46,12 @@ export async function setup(defaults = false): Promise<number> {
       if (!entry) continue;
       if (!(await ctx.ui.confirm(`Remove ${name}?`, false))) continue;
       p.log.step(name);
-      await (await loadTool(entry, ctx.configDir)).uninstall(ctx);
+      try {
+        await (await loadTool(entry, ctx.configDir)).uninstall(ctx);
+      } catch (err) {
+        if (err instanceof Cancelled) throw err;
+        p.log.warn(`${name}: ${(err as Error).message} Removed it from your tools anyway.`);
+      }
       writeConfig({ tools: readConfig().tools.filter((t) => t !== name) });
     }
 
