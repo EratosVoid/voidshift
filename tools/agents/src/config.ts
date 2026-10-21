@@ -5,11 +5,12 @@ import type { Engine } from './engine.ts';
 // A step in a chain. Work steps change code; check steps return a verdict.
 export type StepId = 'vs-dev' | 'ci' | 'vs-qa-review' | 'vs-qa-ui';
 
-export const STEPS: Record<StepId, { label: string; kind: 'work' | 'check'; hint: string }> = {
+export const STEPS: Record<StepId, { label: string; kind: 'work' | 'check'; hint: string; hidden?: boolean }> = {
   'vs-dev': { label: 'Dev', kind: 'work', hint: 'implements the plan, commits, opens a draft PR' },
   ci: { label: 'CI', kind: 'check', hint: "waits for the PR's checks" },
   'vs-qa-review': { label: 'Code review', kind: 'check', hint: 'reviews the diff against the card and plan' },
-  'vs-qa-ui': { label: 'Browser check', kind: 'check', hint: "clicks through the app at the project's URL" },
+  // Off until the runner can start the app from the agent's branch itself.
+  'vs-qa-ui': { label: 'Browser check', kind: 'check', hint: "clicks through the app at the project's URL", hidden: true },
 };
 
 export interface Chain {
@@ -47,7 +48,7 @@ export interface AgentsConfig {
 
 // Shipped with VoidShift; custom chains sit beside them.
 export const BUILT_IN_CHAINS: Record<string, Chain> = {
-  build: { steps: ['vs-dev', 'ci', 'vs-qa-review', 'vs-qa-ui'], maxRounds: 3 },
+  build: { steps: ['vs-dev', 'ci', 'vs-qa-review'], maxRounds: 3 },
   'review-only': { steps: ['ci', 'vs-qa-review'], maxRounds: 1 },
 };
 

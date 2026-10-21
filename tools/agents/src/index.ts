@@ -162,9 +162,8 @@ async function setupProjects(ui: Ui, config: AgentsConfig, log: (l: string) => v
     );
     const path = resolve(expandHome(picked === TYPE ? (await ui.path('Repo path', { initial: homedir() + '/', validate: isRepo })).trim() : picked));
     const name = (await ui.text('Name for this project', { initial: path.split('/').pop(), validate: (v) => (v.trim() ? undefined : 'Required') })).trim();
-    const url = (await ui.text('URL where the app runs, for the browser check (leave empty to skip)', { placeholder: 'http://localhost:3000' })).trim();
-    config.projects[name] = { path, uiUrl: url || undefined };
-    log(`Project ${name}: ${tilde(path)}${url ? `, app at ${url}` : ''}`);
+    config.projects[name] = { ...config.projects[name], path };
+    log(`Project ${name}: ${tilde(path)}`);
     more = await ui.confirm('Add another project?', false);
   }
 }
@@ -180,7 +179,7 @@ async function setupChains(ui: Ui, config: AgentsConfig, log: (l: string) => voi
       const pick = await ui.select<StepId | typeof DONE>(
         steps.length ? `So far: ${steps.map((s) => STEPS[s].label).join(' → ')}. Add a step:` : 'First step:',
         [
-          ...(Object.keys(STEPS) as StepId[]).map((id) => ({ value: id, label: STEPS[id].label, hint: STEPS[id].hint })),
+          ...(Object.keys(STEPS) as StepId[]).filter((id) => !STEPS[id].hidden).map((id) => ({ value: id, label: STEPS[id].label, hint: STEPS[id].hint })),
           ...(steps.length ? [{ value: DONE as typeof DONE, label: 'Done' }] : []),
         ],
       );

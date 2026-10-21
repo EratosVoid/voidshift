@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { BUILT_IN_CHAINS, describeChain, hasWork, migrate } from '../src/config.ts';
 
 test('built-in chains', () => {
-  assert.equal(describeChain(BUILT_IN_CHAINS.build!), 'Dev → CI → Code review → Browser check');
+  assert.equal(describeChain(BUILT_IN_CHAINS.build!), 'Dev → CI → Code review');
   assert.ok(hasWork(BUILT_IN_CHAINS.build!));
   assert.ok(!hasWork(BUILT_IN_CHAINS['review-only']!));
 });
