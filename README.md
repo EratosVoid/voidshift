@@ -75,7 +75,8 @@ voidshift agents start | stop  # the background runner
 - **Your config** lives in `~/.config/voidshift`.
 
 ```sh
-voidshift doctor   # check everything is set up
+voidshift doctor   # check everything is set up, and whether an update is out
+voidshift update   # update VoidShift and every tool you added
 voidshift tools    # list tools
 ```
 

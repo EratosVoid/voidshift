@@ -22,7 +22,7 @@ export function locate(entry: ToolEntry, configDir: string): string | null {
 
 export function fetchTool(entry: ToolEntry, configDir: string): boolean {
   if (locate(entry, configDir)) return true;
-  const r = spawnSync('npm', ['install', '--prefix', join(configDir, 'tools'), entry.pkg], { stdio: 'inherit' });
+  const r = spawnSync('npm', ['install', '--silent', '--no-audit', '--no-fund', '--prefix', join(configDir, 'tools'), entry.pkg], { stdio: 'inherit' });
   return r.status === 0 && locate(entry, configDir) !== null;
 }
 

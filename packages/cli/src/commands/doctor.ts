@@ -3,6 +3,8 @@ import { context, readConfig } from '../config.ts';
 import { loadTool } from '../loader.ts';
 import { findTool } from '../registry.ts';
 import type { Check } from '../tool.ts';
+import { CLI_PKG, cliVersion, isNewer } from '../version.ts';
+import { latestVersion } from './update.ts';
 
 const mark = { ok: '✓', warn: '!', fail: '✗' } as const;
 
@@ -27,6 +29,12 @@ export async function doctor(): Promise<number> {
     } catch (err) {
       checks.push({ name, status: 'fail', detail: (err as Error).message });
     }
+  }
+  const latest = latestVersion(CLI_PKG);
+  if (latest && isNewer(latest, cliVersion())) {
+    checks.push({ name: 'VoidShift', status: 'warn', detail: `${latest} is out (you have ${cliVersion()})`, fix: 'voidshift update' });
+  } else {
+    checks.push({ name: 'VoidShift', status: 'ok', detail: cliVersion() });
   }
   console.log(formatChecks(checks));
   return checks.some((c) => c.status === 'fail') ? 1 : 0;

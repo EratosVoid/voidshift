@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-import { readFileSync } from 'node:fs';
 import { doctor } from './commands/doctor.ts';
 import { setup } from './commands/setup.ts';
+import { update } from './commands/update.ts';
+import { cliVersion } from './version.ts';
 import { addTool, listTools, removeTool, runToolCommand } from './commands/tools.ts';
 import { findTool } from './registry.ts';
 
@@ -14,6 +15,7 @@ Usage
   voidshift tools             List available tools
   voidshift add <tool>        Install and set up a tool
   voidshift remove <tool>     Take a tool down and uninstall it
+  voidshift update            Update VoidShift and every tool you added
   voidshift <tool> <command>  Run a tool, e.g. voidshift awake on
   voidshift --version         Print the version
 
@@ -22,11 +24,6 @@ Awake
   voidshift awake off
   voidshift awake status
 `;
-
-function version(): string {
-  const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-  return pkg.version;
-}
 
 async function main(argv: string[]): Promise<number> {
   const defaults = argv.includes('--defaults');
@@ -40,9 +37,11 @@ async function main(argv: string[]): Promise<number> {
       return addTool(rest[0]);
     case 'remove':
       return removeTool(rest[0]);
+    case 'update':
+      return update();
     case '-v':
     case '--version':
-      console.log(version());
+      console.log(cliVersion());
       return 0;
     case undefined:
       if (process.stdin.isTTY && process.stdout.isTTY) return setup(defaults);
