@@ -28,13 +28,13 @@ jobs:
       - name: Tag matches every package version
         run: |
           tag="${GITHUB_REF_NAME#v}"
-          for dir in packages/cli tools/awake tools/agents; do
+          for dir in packages/cli tools/awake tools/agents tools/memory; do
             v=$(node -p "require('./$dir/package.json').version")
             [ "$v" = "$tag" ] || { echo "$dir is $v, tag is $tag"; exit 1; }
           done
       - run: pnpm release:prepare
       - name: Publish
         run: |
-          for dir in tools/awake tools/agents packages/cli; do
+          for dir in tools/awake tools/agents tools/memory packages/cli; do
             (cd "$dir" && npm publish)
           done

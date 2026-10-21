@@ -8,6 +8,7 @@ import { looksLikeLinearKey, readLinearKey, storeLinearKey } from './keychain.ts
 import { runnerLoaded, startRunner, stopRunner } from './launchd.ts';
 import { createLinear } from './linear.ts';
 import { findRepos } from './repos.ts';
+import { defaultBranch, sh } from './git.ts';
 import { tick } from './runner.ts';
 import type { Check, Tool, ToolContext, Ui } from './types.ts';
 
@@ -171,7 +172,20 @@ async function setupProjects(ui: Ui, config: AgentsConfig, log: (l: string) => v
     const path = resolve(expandHome(picked === TYPE ? (await ui.path('Repo path', { initial: homedir() + '/', validate: isRepo })).trim() : picked));
     const name = (await ui.text('Name for this project', { initial: path.split('/').pop(), validate: (v) => (v.trim() ? undefined : 'Required') })).trim();
     config.projects[name] = { ...config.projects[name], path };
-    log(`Project ${name}: ${tilde(path)}`);
+    const remote = sh('git', ['branch', '-r', '--format=%(refname:short)'], path).stdout.split('\n')
+      .map((b) => b.trim().replace(/^origin\//, '')).filter((b) => b && b !== 'HEAD' && !b.includes(' ') && b !== 'origin');
+    let fallback = '';
+    try {
+      fallback = defaultBranch(path);
+    } catch {
+      // no origin HEAD; the list still works
+    }
+    const current = config.projects[name]!.base || fallback;
+    const base = remote.length
+      ? await ui.search('Pull requests go into which branch?', remote.map((b) => ({ value: b, label: b, hint: b === fallback ? 'default' : undefined })), 'branch', current || undefined)
+      : current;
+    if (base) config.projects[name]!.base = base;
+    log(`Project ${name}: ${tilde(path)}${base ? `, PRs into ${base}` : ''}`);
     more = await ui.confirm('Add another project?', false);
   }
 }
@@ -357,7 +371,9 @@ const agents: Tool = {
     async status(_args, ctx) {
       const c = readAgentsConfig(ctx.configDir);
       ctx.log(`Engine: ${c.engine}`);
-      for (const [n, p] of Object.entries(c.projects)) ctx.log(`Project ${n}: ${tilde(p.path)}${p.uiUrl ? `, app at ${p.uiUrl}` : ''}`);
+      for (const [n, p] of Object.entries(c.projects)) {
+        ctx.log(`Project ${n}: ${tilde(p.path)}${p.base ? `, PRs into ${p.base}` : ''}`);
+      }
       for (const [n, ch] of Object.entries(c.workflows)) ctx.log(`Workflow ${n}: ${describeWorkflow(ch)}`);
       if (!Object.keys(c.workflows).length) ctx.log('No workflows yet. Run voidshift to create one.');
       ctx.log(`Runner: ${runnerLoaded() ? 'running' : 'stopped'}${existsSync(join(agentsDir(ctx.configDir), 'runner.lock')) ? ', working on a card now' : ''}`);
@@ -370,7 +386,7 @@ const agents: Tool = {
 
     async run(args, ctx) {
       const config = readAgentsConfig(ctx.configDir);
-      const code = await tick({ configDir: ctx.configDir, config, linear: linear(), log: ctx.log }, args[0]);
+      const code = await tick({ configDir: ctx.configDir, config, linear: linear(), log: ctx.log, selfCommand: ctx.selfCommand }, args[0]);
       if (!args[0] && code === 0) ctx.log('Nothing to do, or the card was verified.');
       return code;
     },
@@ -379,7 +395,7 @@ const agents: Tool = {
     async tick(_args, ctx) {
       const config = readAgentsConfig(ctx.configDir);
       const log = (l: string) => ctx.log(`${new Date().toISOString()} ${l}`);
-      return tick({ configDir: ctx.configDir, config, linear: linear(), log });
+      return tick({ configDir: ctx.configDir, config, linear: linear(), log, selfCommand: ctx.selfCommand });
     },
 
     async start(_args, ctx) {

@@ -40,6 +40,8 @@ export interface Trigger {
 
 export interface Project {
   path: string;
+  // Branch pull requests go into; the repo's default branch when unset.
+  base?: string;
   // URL where the app runs, for the browser check.
   uiUrl?: string;
 }

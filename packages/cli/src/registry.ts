@@ -26,7 +26,7 @@ export const registry: ToolEntry[] = [
     name: 'memory',
     summary: 'Markdown memory vault recalled into Claude Code and Codex',
     pkg: '@devvoid/voidshift-memory',
-    status: 'planned',
+    status: 'available',
   },
 ];
 

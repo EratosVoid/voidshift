@@ -20,6 +20,7 @@ import { STEPS, agentsDir, hasWork, isProducer, type AgentsConfig, type Workflow
 import { runAgent } from './engine.ts';
 import { commitsAhead, defaultBranch, ensureDraftPr, ensureWorktree, markReady, push, resetWorktree, waitForChecks } from './git.ts';
 import type { Card, Linear } from './linear.ts';
+import { recall, vaultPath } from './memory.ts';
 
 const packDir = fileURLToPath(new URL('../pack/', import.meta.url));
 const skill = (name: string) => readFileSync(join(packDir, name, 'SKILL.md'), 'utf8');
@@ -32,6 +33,8 @@ export interface RunContext {
   config: AgentsConfig;
   linear: Linear;
   log: (line: string) => void;
+  // How to run this CLI again, for `voidshift memory recall`.
+  selfCommand: string[];
 }
 
 function withLabels(card: Card, drop: (l: string) => boolean, add: string[]): string[] {
@@ -47,6 +50,15 @@ You are one step in a workflow. Nobody can answer questions and the
 Linear connection is not available: the card and any plan are included above.
 Do not write plan files; return your output as your final message. Make the
 call the code supports and state it.`;
+
+// Agents keep the memory vault the way you do: durable learnings become notes.
+const memoryNote = (vault: string) => `# Memory
+
+The memory vault is \`${vault}\`. If you learn something durable that a later
+run should know (how to run the tests, something broken on the base branch, a
+trap in this code), save it there as a note: follow \`${vault}/CONVENTIONS.md\`
+and add the note's line to \`${vault}/INDEX.md\`. Update a note in place
+rather than adding a second one. Skip it when nothing durable came up.`;
 
 const isVerdict = (s: StepId) => STEPS[s].output === 'verdict';
 
@@ -78,7 +90,9 @@ export async function runCard(card: Card, trigger: Trigger, workflow: Workflow, 
     }
 
     await linear.setLabels(card, withLabels(card, (l) => l === trigger.label || statusLabel(l), [LABELS.working]));
-    const base = defaultBranch(project.path);
+    const base = project.base || defaultBranch(project.path);
+    const vault = vaultPath(rc.configDir);
+    const known = [recall(rc.selfCommand, rc.configDir, `${workflow.project} ${card.title}\n${card.description ?? ''}`), vault ? memoryNote(vault) : ''].filter(Boolean).join('\n\n');
     const worktree = join(agentsDir(rc.configDir), 'worktrees', card.identifier);
     ensureWorktree(project.path, worktree, card.branchName, base);
     say(`working in ${worktree} on ${card.branchName}`);
@@ -103,8 +117,8 @@ export async function runCard(card: Card, trigger: Trigger, workflow: Workflow, 
         }
       }
       const r = await runAgent({
-        engine: config.engine, model: config.models.review, cwd: worktree, write: step === 'vs-qa', logFile: logFile(step),
-        prompt: buildPrompt({ skill: skill(step), card, plan: planText(), base, round: runs.qa + 1, extra: [ciNote, UNATTENDED].filter(Boolean).join('\n\n') }),
+        engine: config.engine, model: config.models.review, cwd: worktree, vault, write: step === 'vs-qa', logFile: logFile(step),
+        prompt: buildPrompt({ skill: skill(step), card, plan: planText(), base, round: runs.qa + 1, extra: [known, ciNote, UNATTENDED].filter(Boolean).join('\n\n') }),
       });
       if (step === 'vs-qa') resetWorktree(worktree);
       return { step: label, verdict: parseVerdict(r.output), report: r.output };
@@ -141,10 +155,10 @@ export async function runCard(card: Card, trigger: Trigger, workflow: Workflow, 
 
       if (step === 'vs-plan') {
         const r = await runAgent({
-          engine: config.engine, model: config.models.dev, cwd: worktree, write: false, logFile: logFile('plan'),
-          prompt: buildPrompt({ skill: skill('vs-plan'), card, plan: plan ?? '(none yet, you are writing it)', base, round: runs.plan + 1, findings: findings.get(i), extra: UNATTENDED }),
+          engine: config.engine, model: config.models.dev, cwd: worktree, vault, write: false, logFile: logFile('plan'),
+          prompt: buildPrompt({ skill: skill('vs-plan'), card, plan: plan ?? '(none yet, you are writing it)', base, round: runs.plan + 1, findings: findings.get(i), extra: [known, UNATTENDED].filter(Boolean).join('\n\n') }),
         });
-        const result = parseDevResult(r.output);
+          const result = parseDevResult(r.output);
         if (result.status === 'blocked') throw new Park(`The plan agent stopped: ${result.reason}`);
         plan = planBody(r.output);
         await linear.comment(card, `${PLAN_HEADING}\n\n${plan}`);
@@ -154,8 +168,8 @@ export async function runCard(card: Card, trigger: Trigger, workflow: Workflow, 
         push(worktree, card.branchName);
       } else if (step === 'vs-dev') {
         const dev = await runAgent({
-          engine: config.engine, model: config.models.dev, cwd: worktree, write: true, logFile: logFile('dev'),
-          prompt: buildPrompt({ skill: skill('vs-dev'), card, plan: planText(), base, round: runs.dev + 1, findings: findings.get(i) }),
+          engine: config.engine, model: config.models.dev, cwd: worktree, vault, write: true, logFile: logFile('dev'),
+          prompt: buildPrompt({ skill: skill('vs-dev'), card, plan: planText(), base, round: runs.dev + 1, findings: findings.get(i), extra: [known, UNATTENDED].filter(Boolean).join('\n\n') }),
         });
         const result = parseDevResult(dev.output);
         if (result.status === 'blocked') throw new Park(`The dev agent stopped: ${result.reason}`);

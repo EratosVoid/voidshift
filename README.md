@@ -17,8 +17,7 @@ voidshift --defaults   # take every default, ask only what has none
 |---|---|
 | `awake` | Keeps your Mac running, on battery and with the lid closed, and puts sleep back when the battery runs low, the Mac gets hot, a timer ends or it restarts |
 | `agents` | Agents for Claude Code and Codex, and workflows that run them in the background off your Linear cards |
-
-Memory, a markdown vault recalled into Claude Code and Codex, is coming.
+| `memory` | A markdown vault of notes, recalled into Claude Code and Codex before every prompt |
 
 ### awake
 
@@ -63,6 +62,23 @@ voidshift agents status        # workflows, projects, runner
 voidshift agents run ENG-123   # run one card now, in this terminal
 voidshift agents start | stop  # the background runner
 ```
+
+### memory
+
+A folder of markdown notes, one topic per note, with an `INDEX.md` holding one
+keyword line per note. Before every prompt, the words you type are matched
+against the index and the best notes are handed to Claude Code or Codex. A
+`memory` skill tells them how to read the vault and when to write a note:
+decisions and their why, dead ends, things that are not obvious from the code.
+Background agents read it for each card and save what they learn.
+
+```sh
+voidshift memory status          # the vault and where recall is on
+voidshift memory search WORDS    # notes recall would bring up
+```
+
+Setup creates a vault at `~/memory` or uses one you already have. Codex asks you
+to trust the recall hook once: run `/hooks` in Codex.
 
 ## What to know
 

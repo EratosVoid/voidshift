@@ -13,6 +13,8 @@ export interface RunOptions {
   write: boolean;
   logFile: string;
   timeoutMs?: number;
+  // Memory vault the agent may write notes into.
+  vault?: string;
 }
 
 // Tools a write step may use under `claude -p`. Anything else is denied,
@@ -22,12 +24,16 @@ const CLAUDE_READ = ['Read', 'Glob', 'Grep', 'Bash(git diff:*)', 'Bash(git log:*
 
 export function engineArgs(o: RunOptions, outFile: string): { cmd: string; args: string[] } {
   if (o.engine === 'claude') {
-    const args = ['-p', '--output-format', 'text', '--allowedTools', (o.write ? CLAUDE_WRITE : CLAUDE_READ).join(',')];
+    const vaultTools = o.vault ? [`Edit(/${o.vault}/**)`, `Write(/${o.vault}/**)`] : [];
+    const args = ['-p', '--output-format', 'text', '--allowedTools', [...(o.write ? CLAUDE_WRITE : CLAUDE_READ), ...vaultTools].join(',')];
+    if (o.vault) args.push('--add-dir', o.vault);
     if (o.write) args.push('--permission-mode', 'acceptEdits');
     if (o.model) args.push('--model', o.model);
     return { cmd: 'claude', args };
   }
   const args = ['exec', '-C', o.cwd, '-s', o.write ? 'workspace-write' : 'read-only', '-o', outFile];
+  // A read-only sandbox cannot write anywhere, so only write steps get the vault.
+  if (o.vault && o.write) args.push('--add-dir', o.vault);
   if (o.model) args.push('-m', o.model);
   args.push('-');
   return { cmd: 'codex', args };
@@ -43,7 +49,10 @@ export function runAgent(o: RunOptions): Promise<{ ok: boolean; output: string }
   log.write(`$ ${cmd} ${args.join(' ')}\n\n`);
 
   return new Promise((resolve) => {
-    const child = spawn(cmd, args, { cwd: o.cwd, stdio: ['pipe', 'pipe', 'pipe'] });
+    // The runner recalls memory for the card itself; the recall hook would
+    // match on the whole prompt, skill text included.
+    const env = { ...process.env, VOIDSHIFT_RECALL: 'off' };
+    const child = spawn(cmd, args, { cwd: o.cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = '';
     child.stdout.on('data', (d) => {
       stdout += d;

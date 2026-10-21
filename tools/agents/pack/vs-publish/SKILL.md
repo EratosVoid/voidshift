@@ -20,11 +20,14 @@ the background agents. Do every step; stop and report if one fails.
    followed by the plan unchanged. The background agents find the plan by
    that heading, newest first.
 3. **Create the branch** the card names (Linear's branch name for the card),
-   from the repo's default branch, without switching the developer's checkout:
+   from the project's base branch without switching the developer's checkout.
+   The base is the `base` of this repo's project in
+   `~/.config/voidshift/agents/config.json`, or the repo's default branch when
+   it has none:
 
    ```
    git fetch origin
-   git branch <branch> origin/<default>
+   git branch <branch> origin/<base>
    git push -u origin <branch>
    ```
 

@@ -70,7 +70,7 @@ export async function runToolCommand(entry: ToolEntry, args: string[]): Promise<
   const [sub, ...rest] = args;
   const command = sub ? tool.commands?.[sub] : undefined;
   if (!command) {
-    const names = Object.keys(tool.commands ?? {}).filter((n) => n !== 'tick');
+    const names = Object.keys(tool.commands ?? {}).filter((n) => n !== 'tick' && n !== 'recall');
     console.error(`usage: voidshift ${entry.name} <${names.join('|')}>`);
     return 2;
   }

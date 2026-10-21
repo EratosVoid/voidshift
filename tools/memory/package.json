@@ -1,0 +1,51 @@
+{
+  "name": "@devvoid/voidshift-memory",
+  "version": "0.2.0",
+  "description": "A markdown memory vault recalled into Claude Code and Codex before every prompt.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/EratosVoid/voidshift.git",
+    "directory": "tools/memory"
+  },
+  "homepage": "https://github.com/EratosVoid/voidshift#readme",
+  "bugs": {
+    "url": "https://github.com/EratosVoid/voidshift/issues"
+  },
+  "keywords": [
+    "claude-code",
+    "codex",
+    "memory",
+    "markdown",
+    "cli",
+    "macos"
+  ],
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "os": [
+    "darwin"
+  ],
+  "engines": {
+    "node": ">=22.18"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test test/*.test.ts",
+    "prepublishOnly": "rm -rf dist && tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.0",
+    "typescript": "^5.9.0"
+  }
+}
