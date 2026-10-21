@@ -34,21 +34,23 @@ what gets built.
 
 ## Output
 
-Findings first, most severe first, each one line with the file and line that
-proves it and the fix. Then exactly one final line:
+Write for a busy developer: the answer first, plain words, no file paths in the
+main points.
+
+1. First line: `Ready to build.` or `Not ready yet. N things to fix:`
+2. The findings that change what gets built, most important first, at most 5,
+   one short plain line each: what is wrong and what to do about it.
+3. Everything smaller in one line: `Minor: ...`.
+4. A short `Details` section: for each finding, the file and line that proves it.
+5. Last line, exactly one of:
 
 ```
 VERDICT: SHIP
-```
-
-or
-
-```
 VERDICT: FIX
 ```
 
 SHIP means a dev agent can execute the plan as written. Offer to apply the
-fixes to the plan file if the developer wants.
+fixes to the plan file.
 
 ## Rules
 

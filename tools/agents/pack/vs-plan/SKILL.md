@@ -65,7 +65,16 @@ Then write the plan to `~/.config/voidshift/plans/<CARD>.md` (create the
 folder if needed). Show the developer a short summary
 and the path. Never post to Linear from this agent; `vs-publish` does that.
 
-## Plan shape
+## What you show the developer
+
+The plan file holds the detail. In the chat, keep it short and plain:
+
+- One or two lines: what the card really needs, and what it got wrong.
+- The steps, one short sentence each, no file paths.
+- Any decision only they can make, as a question with your pick.
+- The path to the plan file.
+
+## Plan shape (the file)
 
 Length follows the change: under 350 words for a small one, never padded.
 

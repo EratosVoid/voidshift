@@ -32,9 +32,13 @@ will answer questions; make the call the plan and the code support.
 
 ## Report
 
-End with a short report: what changed, anything that differs from the plan
-and why, and the checks you ran with their results. The final line is exactly
-one of:
+Short and plain, for a reviewer who has not seen the plan:
+
+- First line: what you did, in one sentence.
+- Up to 3 lines on anything that differs from the plan and why.
+- One line on checks: which ran, pass or fail.
+
+The final line is exactly one of:
 
 ```
 RESULT: DONE

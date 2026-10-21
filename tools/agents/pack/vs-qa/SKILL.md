@@ -53,9 +53,16 @@ Only if the change has a user-facing surface.
 
 ## Output
 
-One section per check: CI, Code review, Usability (or "skipped: why").
-Findings most severe first, each one line: where, what is wrong, the fix.
-Then exactly one final line:
+Write for a busy developer: the answer first, plain words.
+
+1. First line: `Passed.` or `Changes needed: N things.`
+2. One line per check: CI, Code review, Usability, each passed, failed or
+   skipped (with why).
+3. The problems, most important first, at most 5, one short plain line each:
+   what is wrong and what to do.
+4. Everything smaller in one line: `Minor: ...`.
+5. A short `Details` section with the file and line for each problem.
+6. Last line, exactly one of:
 
 ```
 VERDICT: SHIP

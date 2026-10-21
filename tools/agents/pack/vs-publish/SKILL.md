@@ -33,8 +33,8 @@ the background agents. Do every step; stop and report if one fails.
    is assigned to the developer. That label is what the background agents
    pick up.
 5. **Clean up.** Delete the local plan file.
-6. **Report** the card, the branch and that the agents will pick it up within
-   about a minute if `voidshift agents` is running.
+6. **Report** in one line: the card, the branch, and that the agents pick it
+   up within about a minute if the runner is on.
 
 ## Rules
 
