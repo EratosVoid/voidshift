@@ -1,0 +1,40 @@
+name: Release
+
+# Push a tag like v0.2.0 to publish every package at that version.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+      # npm 11.5.1+ is required for trusted publishing (no NPM_TOKEN).
+      - run: npm install -g npm@latest
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
+      - name: Tag matches every package version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          for dir in packages/cli tools/awake tools/agents; do
+            v=$(node -p "require('./$dir/package.json').version")
+            [ "$v" = "$tag" ] || { echo "$dir is $v, tag is $tag"; exit 1; }
+          done
+      - run: pnpm release:prepare
+      - name: Publish
+        run: |
+          for dir in tools/awake tools/agents packages/cli; do
+            (cd "$dir" && npm publish)
+          done

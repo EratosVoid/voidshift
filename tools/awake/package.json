@@ -1,13 +1,32 @@
 {
   "name": "@devvoid/voidshift-awake",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Keep a Mac running on battery with the lid closed, with guardrails.",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/EratosVoid/voidshift.git",
+    "directory": "tools/awake"
+  },
+  "homepage": "https://github.com/EratosVoid/voidshift#readme",
+  "bugs": {
+    "url": "https://github.com/EratosVoid/voidshift/issues"
+  },
+  "keywords": [
+    "claude-code",
+    "codex",
+    "agents",
+    "linear",
+    "cli",
+    "macos"
+  ],
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
-    "dist"
+    "dist",
+    "LICENSE",
+    "README.md"
   ],
   "os": [
     "darwin"
@@ -15,10 +34,15 @@
   "engines": {
     "node": ">=22.18"
   },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test test/*.test.ts"
+    "test": "node --test test/*.test.ts",
+    "prepublishOnly": "tsc -p tsconfig.json"
   },
   "devDependencies": {
     "@types/node": "^22.18.0",

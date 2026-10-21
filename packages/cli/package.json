@@ -1,14 +1,33 @@
 {
   "name": "@devvoid/voidshift",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "One CLI for the Void dev tools: keep your Mac awake, run agents in the background, shared skills and memory for Claude Code and Codex.",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/EratosVoid/voidshift.git",
+    "directory": "packages/cli"
+  },
+  "homepage": "https://github.com/EratosVoid/voidshift#readme",
+  "bugs": {
+    "url": "https://github.com/EratosVoid/voidshift/issues"
+  },
+  "keywords": [
+    "claude-code",
+    "codex",
+    "agents",
+    "linear",
+    "cli",
+    "macos"
+  ],
   "type": "module",
   "bin": {
     "voidshift": "dist/main.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "LICENSE",
+    "README.md"
   ],
   "os": [
     "darwin"
@@ -16,17 +35,22 @@
   "engines": {
     "node": ">=22.18"
   },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --test test/*.test.ts",
-    "dev": "node src/main.ts"
+    "dev": "node src/main.ts",
+    "prepublishOnly": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@clack/prompts": "^1.8.1"
   },
   "devDependencies": {
     "@types/node": "^22.18.0",
     "typescript": "^5.9.0"
-  },
-  "dependencies": {
-    "@clack/prompts": "^1.8.1"
   }
 }
