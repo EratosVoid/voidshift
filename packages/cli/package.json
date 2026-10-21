@@ -48,10 +48,14 @@
     "prepublishOnly": "rm -rf dist && tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@clack/prompts": "^1.8.1"
+    "@clack/prompts": "^1.8.1",
+    "ink": "^8.0.0",
+    "react": "^19.3.1"
   },
   "devDependencies": {
     "@types/node": "^22.18.0",
+    "@types/react": "^19.3.0",
+    "ink-testing-library": "^4.0.0",
     "typescript": "^5.9.0"
   }
 }

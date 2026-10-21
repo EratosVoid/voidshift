@@ -64,7 +64,7 @@ export async function removeTool(name: string | undefined): Promise<number> {
   return 0;
 }
 
-const INTERNAL = ['tick', 'recall'];
+const INTERNAL = ['tick', 'recall', 'steps'];
 
 export function toolUsage(name: string, tool: Tool): string {
   const names = Object.keys(tool.commands ?? {}).filter((n) => !INTERNAL.includes(n));

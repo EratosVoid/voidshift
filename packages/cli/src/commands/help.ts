@@ -5,6 +5,7 @@ import { toolHelp } from './tools.ts';
 // command's own --help.
 export const usages: Record<string, string> = {
   setup: 'Usage: vsf setup [tool] [--defaults]\n\nPick your tools and configure them, or set up one tool.\n--defaults takes every default and asks only what has none.',
+  ui: 'Usage: vsf ui\n\nOpen the dashboard. Plain vsf opens it too. Needs a terminal.',
   status: 'Usage: vsf status [--json]\n\nShow what each added tool is doing.',
   doctor: 'Usage: vsf doctor [--json]\n\nCheck this Mac is ready. Exits 1 when a check fails.',
   config:
@@ -22,7 +23,7 @@ export function mainHelp(): string {
   return `vsf: one CLI for the Void dev tools
 
 Usage
-  vsf                          Dashboard (status for now)
+  vsf                          Open the dashboard (also: vsf ui)
   vsf setup [tool] [--defaults]  Pick your tools and configure them
   vsf status [--json]          What each tool is doing
   vsf doctor [--json]          Check this Mac is ready

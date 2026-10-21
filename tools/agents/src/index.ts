@@ -1129,6 +1129,13 @@ const agents: Tool = {
       return 0;
     },
 
+    // Hidden, like tick: the step list and workflow templates, for the dashboard's forms.
+    async steps(_args, ctx) {
+      const steps = (Object.keys(STEPS) as StepId[]).map((id) => ({ id, name: id.replace(/^vs-/, ''), ...STEPS[id] }));
+      out(ctx, { steps, templates: TEMPLATES });
+      return 0;
+    },
+
     workflow: (args, ctx) => group('workflow', workflowSubs, args, ctx),
 
     async projects(args, ctx) {

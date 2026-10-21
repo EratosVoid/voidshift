@@ -12,6 +12,11 @@ import { addTool, listTools, removeTool, runToolCommand } from './commands/tools
 import { findTool } from './registry.ts';
 import { Cancelled } from './ui.ts';
 
+// Ink and React load only here, so plain commands never pay for them.
+async function openDashboard(): Promise<number> {
+  return (await import('./tui/run.ts')).runDashboard();
+}
+
 async function main(argv: string[]): Promise<number> {
   const [cmd, ...rest] = argv;
   // Umbrella commands answer --help themselves; tools handle their own.
@@ -25,12 +30,16 @@ async function main(argv: string[]): Promise<number> {
       if (cmd === '--defaults') return setup(true);
       if (process.stdin.isTTY && process.stdout.isTTY) {
         if (readConfig().tools.length === 0) return setup(false);
-        const code = await status([]);
-        console.log('\nvsf help lists every command.');
-        return code;
+        return openDashboard();
       }
       console.log(mainHelp());
       return 0;
+    case 'ui':
+      if (!(process.stdin.isTTY && process.stdout.isTTY)) {
+        console.error('vsf ui needs a terminal. Use vsf status for plain output.');
+        return 2;
+      }
+      return openDashboard();
     case 'setup':
       return setupCommand(rest);
     case 'status':
