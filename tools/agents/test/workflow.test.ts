@@ -30,13 +30,17 @@ test('qa passes unless something says FIX', () => {
   assert.equal(qaPassed([{ step: 'ci', verdict: 'SHIP', report: '' }, { step: 'review', verdict: 'FIX', report: 'x' }]), false);
 });
 
-test('findings only carry FIX steps', () => {
-  const f = findingsFor([
+test('findings only carry FIX steps; one failure needs no heading', () => {
+  const one = findingsFor([
     { step: 'ci', verdict: 'SHIP', report: 'green' },
-    { step: 'review', verdict: 'FIX', report: 'a.ts:3 wrong\nVERDICT: FIX' },
+    { step: 'review', verdict: 'FIX', report: 'a.ts:3 wrong' },
   ]);
-  assert.match(f, /### review/);
-  assert.doesNotMatch(f, /green/);
+  assert.equal(one, 'a.ts:3 wrong');
+  const two = findingsFor([
+    { step: 'Plan review', verdict: 'FIX', report: 'x' },
+    { step: 'QA', verdict: 'FIX', report: 'y' },
+  ]);
+  assert.match(two, /### Plan review\n\nx\n\n### QA\n\ny/);
 });
 
 test('plain "## Plan" heading is read too', () => {

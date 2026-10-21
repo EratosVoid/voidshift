@@ -121,13 +121,12 @@ export async function runCard(card: Card, trigger: Trigger, workflow: Workflow, 
         for (const s of steps.slice(start, end)) results.push(await check(s));
         runs.qa++;
         await linear.setLabels(card, withLabels(card, () => false, [LABELS.qa(runs.qa)]));
-        const summary = results.map((r) => `- ${r.step}: ${r.verdict}`).join('\n');
         if (qaPassed(results)) {
           i = end;
           continue;
         }
         const notes = findingsFor(results);
-        await linear.comment(card, `**Changes needed (round ${runs.qa}).**\n\n${summary}\n\n${notes}`);
+        await linear.comment(card, `**Changes needed (round ${runs.qa}).**\n\n${notes}`);
         const target = fixTarget(steps, start, isProducer);
         if (target < 0) {
           await linear.setLabels(card, withLabels(card, (l) => l === LABELS.working, [LABELS.changes]));
@@ -213,7 +212,13 @@ export async function tick(rc: RunContext, only?: string): Promise<number> {
   mkdirSync(agentsDir(rc.configDir), { recursive: true });
   writeFileSync(lock, String(process.pid));
   try {
-    const job = await nextJob(rc, only);
+    let job: Awaited<ReturnType<typeof nextJob>>;
+    try {
+      job = await nextJob(rc, only);
+    } catch (err) {
+      rc.log(`Could not check Linear (${(err as Error).message}). Trying again next minute.`);
+      return 1;
+    }
     if (!job) {
       if (only) rc.log(`${only} starts no workflow: it needs a workflow's team and label.`);
       return only ? 1 : 0;

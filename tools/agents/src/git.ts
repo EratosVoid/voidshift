@@ -65,20 +65,49 @@ export function markReady(worktree: string, branch: string): boolean {
   return sh('gh', ['pr', 'ready', branch], worktree).ok;
 }
 
-// Waits for CI on the PR. Repos without CI pass through as SKIP.
+export interface CheckSummary {
+  failed: { name: string; link: string }[];
+  pending: string[];
+  passed: number;
+}
+
+// Parses plain `gh pr checks` output: name, state, duration, link per line,
+// tab separated. Works on old gh versions that lack --json.
+export function summarizeChecks(text: string): CheckSummary {
+  const out: CheckSummary = { failed: [], pending: [], passed: 0 };
+  for (const line of text.split('\n')) {
+    const [name, state, , link] = line.split('\t');
+    if (!name || !state) continue;
+    if (state === 'pass' || state === 'skipping') out.passed++;
+    else if (state === 'pending') out.pending.push(name.trim());
+    else out.failed.push({ name: name.trim(), link: (link ?? '').trim() });
+  }
+  return out;
+}
+
+// One short line per failed check, for the card and for Dev.
+export function ciReport(s: CheckSummary): string {
+  const lines = s.failed.map((f) => `- ${f.name}${f.link ? `: ${f.link}` : ''}`);
+  const pending = s.pending.length ? `\nStill running: ${s.pending.join(', ')}.` : '';
+  return `CI failed:\n${lines.join('\n')}${pending}`;
+}
+
+// Waits for CI on the PR, then reads the final state once. Repos without CI
+// pass through as SKIP.
 export function waitForChecks(worktree: string, branch: string, timeoutMs = 30 * 60_000): Promise<{ verdict: 'SHIP' | 'FIX' | 'SKIP'; report: string }> {
   return new Promise((resolve) => {
-    const child = spawn('gh', ['pr', 'checks', branch, '--watch', '--interval', '30'], { cwd: worktree });
+    const child = spawn('gh', ['pr', 'checks', branch, '--watch', '--interval', '30'], { cwd: worktree, stdio: ['ignore', 'pipe', 'pipe'] });
     let text = '';
     child.stdout.on('data', (d) => (text += d));
     child.stderr.on('data', (d) => (text += d));
     const timer = setTimeout(() => child.kill('SIGTERM'), timeoutMs);
-    child.on('close', (code) => {
+    child.on('close', () => {
       clearTimeout(timer);
-      const report = text.trim().split('\n').slice(-40).join('\n');
-      if (/no checks reported/i.test(text)) resolve({ verdict: 'SKIP', report: 'No CI checks on this repo.' });
-      else if (code === 0) resolve({ verdict: 'SHIP', report });
-      else resolve({ verdict: 'FIX', report: `CI did not pass:\n\n${report}` });
+      if (/no checks reported/i.test(text)) return resolve({ verdict: 'SKIP', report: 'No CI checks on this repo.' });
+      const summary = summarizeChecks(sh('gh', ['pr', 'checks', branch], worktree).stdout);
+      if (!summary.failed.length && !summary.pending.length) return resolve({ verdict: 'SHIP', report: `CI passed (${summary.passed} checks).` });
+      if (!summary.failed.length) return resolve({ verdict: 'FIX', report: `CI did not finish in time. Still running: ${summary.pending.join(', ')}.` });
+      resolve({ verdict: 'FIX', report: ciReport(summary) });
     });
   });
 }

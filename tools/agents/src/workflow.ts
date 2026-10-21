@@ -49,10 +49,9 @@ export function qaPassed(results: StepResult[]): boolean {
 
 // What the dev agent sees on the next round.
 export function findingsFor(results: StepResult[]): string {
-  return results
-    .filter((r) => r.verdict === 'FIX')
-    .map((r) => `### ${r.step}\n\n${r.report.trim()}`)
-    .join('\n\n');
+  const failed = results.filter((r) => r.verdict === 'FIX');
+  if (failed.length === 1) return failed[0]!.report.trim();
+  return failed.map((r) => `### ${r.step}\n\n${r.report.trim()}`).join('\n\n');
 }
 
 export function latestPlan(comments: { body: string; createdAt: string }[]): string | null {

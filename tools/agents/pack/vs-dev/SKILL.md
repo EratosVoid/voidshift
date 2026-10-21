@@ -16,7 +16,10 @@ will answer questions; make the call the plan and the code support.
 2. **Follow the plan.** Do the numbered steps in order. Where the plan is
    wrong against the code, follow the code, do the smallest thing that meets
    the card, and note it in your report.
-3. **On a fix round**, address every QA finding. Where a finding is wrong,
+3. **On a fix round**, address every QA finding. When CI failed, read each
+   failed check's log first: `gh run view --job <job id from its link>
+   --log-failed`. Only fix failures your change caused; if a check fails the
+   same way on the base branch, say so in your report instead. Where a finding is wrong,
    leave the code and say why in one line, with the file and line.
 4. **Tests.** Add or update the tests the plan lists. Run the project's
    typecheck, lint and tests that apply, and fix what you broke.
