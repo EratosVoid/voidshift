@@ -185,23 +185,28 @@ const agents: Tool = {
     }
 
     const teams = await linear().teams();
-    let more = Object.keys(config.repos).length === 0 || (await ui.confirm('Add another repo for agents to build in?', false));
+    if (!Object.keys(config.repos).length) {
+      ctx.log('Background agents build Linear cards in your local repos. Link each Linear team to the repo its cards change.');
+    }
+    let more = Object.keys(config.repos).length === 0 || (await ui.confirm('Link another Linear team to a repo?', false));
     while (more) {
+      const team = await ui.select(
+        'Which Linear team?',
+        teams.map((t) => ({ value: t.key, label: `${t.key}  ${t.name}`, hint: config.repos[t.key] ? `now ${tilde(config.repos[t.key]!)}` : undefined })),
+      );
       const cwd = process.cwd();
       const path = expandHome(
-        await ui.text('Path to a repo agents should build in', {
-          initial: existsSync(join(cwd, '.git')) ? cwd : undefined,
-          placeholder: '~/code/my-app',
-          validate: (v) => (existsSync(join(expandHome(v.trim()), '.git')) ? undefined : 'Not a git repository'),
-        }),
-      ).trim();
-      const team = await ui.select(
-        'Cards from which Linear team build here?',
-        teams.map((t) => ({ value: t.key, label: `${t.key}  ${t.name}` })),
+        (
+          await ui.text(`Where is the repo for ${team} cards on this Mac?`, {
+            initial: config.repos[team] ?? (existsSync(join(cwd, '.git')) ? cwd : undefined),
+            placeholder: '~/code/my-app',
+            validate: (v) => (existsSync(join(expandHome(v.trim()), '.git')) ? undefined : 'Not a git repository'),
+          })
+        ).trim(),
       );
       config.repos[team] = resolve(path);
-      ctx.log(`${team} cards build in ${resolve(path)}`);
-      more = await ui.confirm('Add another repo?', false);
+      ctx.log(`${team} cards will be built in ${tilde(resolve(path))}`);
+      more = await ui.confirm('Link another Linear team to a repo?', false);
     }
     writeAgentsConfig(ctx.configDir, config);
 
