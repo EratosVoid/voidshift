@@ -9,7 +9,7 @@ import {
   parseVerdict,
   qaPassed,
   skillBody,
-} from '../src/chain.ts';
+} from '../src/workflow.ts';
 
 test('verdict: last line wins, unreadable is FIX', () => {
   assert.equal(parseVerdict('looks good\nVERDICT: SHIP'), 'SHIP');
@@ -72,7 +72,7 @@ test('prompt inlines the skill body without frontmatter', () => {
   assert.doesNotMatch(p, /name: vs-dev/);
 });
 
-import { fixTarget, planBody, verdictBlock } from '../src/chain.ts';
+import { fixTarget, planBody, verdictBlock } from '../src/workflow.ts';
 
 const steps = ['vs-plan', 'vs-plan-review', 'vs-dev', 'ci', 'vs-qa-review'];
 const verdict = (s: string) => ['vs-plan-review', 'ci', 'vs-qa-review'].includes(s);

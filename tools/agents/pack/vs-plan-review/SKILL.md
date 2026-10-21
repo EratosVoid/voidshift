@@ -55,7 +55,7 @@ fixes to the plan file if the developer wants.
 - No em dashes or en dashes.
 - No narration of process. State findings.
 
-## When VoidShift runs you in a chain
+## When VoidShift runs you in a workflow
 
 The card and the plan are in the prompt; read them there instead of the plan
 file and Linear. Do not offer to edit anything. End with the VERDICT line.

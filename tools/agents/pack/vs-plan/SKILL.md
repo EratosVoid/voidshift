@@ -97,7 +97,7 @@ anything a human must click.
 - No em dashes or en dashes.
 - No narration of process. State findings.
 
-## When VoidShift runs you in a chain
+## When VoidShift runs you in a workflow
 
 The card is in the prompt and nobody can answer. Skip the Linear fetch and the
 questions: pick the sensible default for anything open and state it under

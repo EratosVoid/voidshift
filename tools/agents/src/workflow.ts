@@ -1,4 +1,4 @@
-// The build chain and the pure decisions around it. The runner does the I/O;
+// The build workflow and the pure decisions around it. The runner does the I/O;
 // everything here is testable without Linear, git or an agent.
 
 export const PLAN_HEADING = '## VoidShift plan';

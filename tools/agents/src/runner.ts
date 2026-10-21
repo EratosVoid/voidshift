@@ -15,8 +15,8 @@ import {
   qaPassed,
   verdictBlock,
   type StepResult,
-} from './chain.ts';
-import { STEPS, agentsDir, hasWork, isProducer, type AgentsConfig, type Chain, type Project, type StepId, type Trigger } from './config.ts';
+} from './workflow.ts';
+import { STEPS, agentsDir, hasWork, isProducer, type AgentsConfig, type Workflow, type Project, type StepId, type Trigger } from './config.ts';
 import { runAgent } from './engine.ts';
 import { commitsAhead, defaultBranch, ensureDraftPr, ensureWorktree, markReady, push, resetWorktree, waitForChecks } from './git.ts';
 import type { Card, Linear } from './linear.ts';
@@ -43,23 +43,23 @@ const statusLabel = (l: string) =>
 
 const UNATTENDED = `# Running unattended
 
-You are one step in a VoidShift chain. Nobody can answer questions and the
+You are one step in a VoidShift workflow. Nobody can answer questions and the
 Linear connection is not available: the card and any plan are included above.
 Do not write plan files; return your output as your final message. Make the
 call the code supports and state it.`;
 
 const isVerdict = (s: StepId) => STEPS[s].output === 'verdict';
 
-// One card through a trigger's chain. Steps run in order. A failed check (or a
+// One card through a trigger's workflow. Steps run in order. A failed check (or a
 // run of consecutive checks) sends its findings back to the nearest earlier
-// step that produces something, Plan or Dev, and the chain continues from
+// step that produces something, Plan or Dev, and the workflow continues from
 // there, until everything passes or the loop cap parks the card.
-export async function runCard(card: Card, trigger: Trigger, chain: Chain, project: Project, rc: RunContext): Promise<'verified' | 'changes' | 'parked'> {
+export async function runCard(card: Card, trigger: Trigger, workflow: Workflow, project: Project, rc: RunContext): Promise<'verified' | 'changes' | 'parked'> {
   const { linear, config, log } = rc;
   const runDir = join(agentsDir(rc.configDir), 'runs', card.identifier, stamp());
   mkdirSync(runDir, { recursive: true });
   const say = (line: string) => log(`${card.identifier} ${line}`);
-  const steps = chain.steps;
+  const steps = workflow.steps;
 
   async function park(reason: string): Promise<'parked'> {
     say(`parked: ${reason}`);
@@ -74,7 +74,7 @@ export async function runCard(card: Card, trigger: Trigger, chain: Chain, projec
     const firstPlan = steps.indexOf('vs-plan');
     const needsPlan = steps.findIndex((s) => s === 'vs-dev' || s === 'vs-plan-review');
     if (!plan && needsPlan >= 0 && (firstPlan < 0 || firstPlan > needsPlan)) {
-      throw new Park('No comment starting with "## VoidShift plan" was found. Publish a plan first, or start the chain with Plan.');
+      throw new Park('No comment starting with "## VoidShift plan" was found. Publish a plan first, or start the workflow with Plan.');
     }
 
     await linear.setLabels(card, withLabels(card, (l) => l === trigger.label || statusLabel(l), [LABELS.working]));
@@ -134,7 +134,7 @@ export async function runCard(card: Card, trigger: Trigger, chain: Chain, projec
           say('changes requested');
           return 'changes';
         }
-        if (++loops > chain.maxRounds) throw new Park(`Checks still failed after sending the work back ${chain.maxRounds} times. Latest findings are in the comment above.${prUrl ? ` PR: ${prUrl}` : ''}`);
+        if (++loops > workflow.maxRounds) throw new Park(`Checks still failed after sending the work back ${workflow.maxRounds} times. Latest findings are in the comment above.${prUrl ? ` PR: ${prUrl}` : ''}`);
         findings.set(target, notes);
         i = target;
         continue;
@@ -171,12 +171,12 @@ export async function runCard(card: Card, trigger: Trigger, chain: Chain, projec
     }
 
     let moved = false;
-    if (hasWork(chain)) {
+    if (hasWork(workflow)) {
       markReady(worktree, card.branchName);
       moved = await linear.moveTo(card, config.reviewState);
     }
     await linear.setLabels(card, withLabels(card, (l) => l === LABELS.working, [LABELS.verified]));
-    await linear.comment(card, `**VoidShift: every step passed.**${prUrl ? `\n\nPR ready for review: ${prUrl}` : ''}${hasWork(chain) && !moved ? `\n\n(No "${config.reviewState}" state on this team, so the card was not moved.)` : ''}`);
+    await linear.comment(card, `**VoidShift: every step passed.**${prUrl ? `\n\nPR ready for review: ${prUrl}` : ''}${hasWork(workflow) && !moved ? `\n\n(No "${config.reviewState}" state on this team, so the card was not moved.)` : ''}`);
     say('verified');
     return 'verified';
   } catch (err) {
@@ -185,14 +185,14 @@ export async function runCard(card: Card, trigger: Trigger, chain: Chain, projec
   }
 }
 
-// The first card waiting on any chain's triggers, in chain order.
-export async function nextJob(rc: RunContext, only?: string): Promise<{ card: Card; trigger: Trigger; chain: string } | null> {
+// The first card waiting on any workflow's triggers, in workflow order.
+export async function nextJob(rc: RunContext, only?: string): Promise<{ card: Card; trigger: Trigger; workflow: string } | null> {
   const pinned = only ? await rc.linear.card(only) : null;
-  for (const [name, chain] of Object.entries(rc.config.chains)) {
-    for (const trigger of chain.triggers) {
+  for (const [name, workflow] of Object.entries(rc.config.workflows)) {
+    for (const trigger of workflow.triggers) {
       const cards = pinned ? [pinned] : await rc.linear.myCardsWithLabel(trigger.label);
       const card = cards.find((c) => c.teamKey === trigger.team && c.labels.includes(trigger.label));
-      if (card) return { card, trigger, chain: name };
+      if (card) return { card, trigger, workflow: name };
     }
   }
   return null;
@@ -215,16 +215,16 @@ export async function tick(rc: RunContext, only?: string): Promise<number> {
   try {
     const job = await nextJob(rc, only);
     if (!job) {
-      if (only) rc.log(`${only} starts no chain: it needs a chain's team and label.`);
+      if (only) rc.log(`${only} starts no workflow: it needs a workflow's team and label.`);
       return only ? 1 : 0;
     }
-    const chain = rc.config.chains[job.chain]!;
-    const project = rc.config.projects[chain.project];
+    const workflow = rc.config.workflows[job.workflow]!;
+    const project = rc.config.projects[workflow.project];
     if (!project) {
-      rc.log(`Chain ${job.chain} points at a missing project ${chain.project}. Run voidshift to fix it.`);
+      rc.log(`Workflow ${job.workflow} points at a missing project ${workflow.project}. Run voidshift to fix it.`);
       return 1;
     }
-    const outcome = await runCard(job.card, job.trigger, chain, project, rc);
+    const outcome = await runCard(job.card, job.trigger, workflow, project, rc);
     return outcome === 'verified' ? 0 : 1;
   } finally {
     rmSync(lock, { force: true });

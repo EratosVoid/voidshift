@@ -3,7 +3,7 @@ import { existsSync, lstatSync, mkdirSync, readdirSync, readlinkSync, rmSync, sy
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { AGENTS, STEPS, TEMPLATES, isProducer, agentsDir, describeChain, describeSteps, stepEnabled, visibleAgents, readAgentsConfig, writeAgentsConfig, type AgentsConfig, type StepId, type Trigger } from './config.ts';
+import { AGENTS, STEPS, TEMPLATES, isProducer, agentsDir, describeWorkflow, describeSteps, stepEnabled, visibleAgents, readAgentsConfig, writeAgentsConfig, type AgentsConfig, type StepId, type Trigger } from './config.ts';
 import { looksLikeLinearKey, readLinearKey, storeLinearKey } from './keychain.ts';
 import { runnerLoaded, startRunner, stopRunner } from './launchd.ts';
 import { createLinear } from './linear.ts';
@@ -149,11 +149,11 @@ function linear() {
   return createLinear(key);
 }
 
-// Named local repos the chains run in. Triggers point at them by name.
+// Named local repos the workflows run in. Triggers point at them by name.
 async function setupProjects(ui: Ui, config: AgentsConfig, log: (l: string) => void): Promise<void> {
   const names = Object.keys(config.projects);
   if (names.length) log(`Projects: ${names.map((n) => `${n} (${tilde(config.projects[n]!.path)})`).join(', ')}`);
-  else log('A project is a repo on this Mac where agents do the work. Add one now; chains run in it.');
+  else log('A project is a repo on this Mac where agents do the work. Add one now; workflows run in it.');
   let more = names.length === 0 || (await ui.confirm('Add a project?', false));
   while (more) {
     const isRepo = (v: string) => (existsSync(join(expandHome(v.trim()), '.git')) ? undefined : 'Not a git repository');
@@ -196,21 +196,21 @@ async function pickSteps(ui: Ui, config: AgentsConfig): Promise<StepId[]> {
   }
 }
 
-// A chain: what starts it, the steps it runs, and the project it runs in.
-async function setupChains(ui: Ui, config: AgentsConfig, teams: { key: string; name: string }[], log: (l: string) => void): Promise<void> {
+// A workflow: what starts it, the steps it runs, and the project it runs in.
+async function setupWorkflows(ui: Ui, config: AgentsConfig, teams: { key: string; name: string }[], log: (l: string) => void): Promise<void> {
   log(
     [
-      'A chain starts when one of your Linear cards gets a label, then runs agents',
+      'A workflow starts when one of your Linear cards gets a label, then runs agents',
       'in order in a project. When a check (Plan review or QA) finds problems, the',
       'work goes back to the step that made it, Plan or Dev, with the findings, until',
       'the checks pass or the limit parks the card for you.',
     ].join('\n'),
   );
-  for (const [name, chain] of Object.entries(config.chains)) log(`Chain ${name}: ${describeChain(chain)}`);
+  for (const [name, workflow] of Object.entries(config.workflows)) log(`Workflow ${name}: ${describeWorkflow(workflow)}`);
   const projects = Object.keys(config.projects);
   if (!projects.length) return;
 
-  let more = Object.keys(config.chains).length === 0 || (await ui.confirm('Create another chain?', false));
+  let more = Object.keys(config.workflows).length === 0 || (await ui.confirm('Create another workflow?', false));
   while (more) {
     const triggers: Trigger[] = [];
     do {
@@ -220,7 +220,7 @@ async function setupChains(ui: Ui, config: AgentsConfig, teams: { key: string; n
       );
       const label = (await ui.text('...gets which label?', { initial: 'vs-plan', validate: (v) => (v.trim() ? undefined : 'Required') })).trim();
       triggers.push({ source: 'linear', team, label });
-    } while (await ui.confirm('Add another way to start this chain?', false));
+    } while (await ui.confirm('Add another way to start this workflow?', false));
 
     const usable = Object.entries(TEMPLATES).filter(([, t]) => t.steps.every((st) => stepEnabled(st, config.enabled)));
     const template = await ui.select(
@@ -240,18 +240,18 @@ async function setupChains(ui: Ui, config: AgentsConfig, teams: { key: string; n
           : 1;
     const project = projects.length === 1 ? projects[0]! : await ui.select('Runs in which project?', projects.map((n) => ({ value: n, label: n, hint: tilde(config.projects[n]!.path) })));
     const suggested = `${project}-${template === CUSTOM ? 'custom' : template}`;
-    const name = (await ui.text('Name for this chain', { initial: config.chains[suggested] ? undefined : suggested, validate: (v) => (v.trim() && !config.chains[v.trim()] ? undefined : 'Pick a new name') })).trim();
+    const name = (await ui.text('Name for this workflow', { initial: config.workflows[suggested] ? undefined : suggested, validate: (v) => (v.trim() && !config.workflows[v.trim()] ? undefined : 'Pick a new name') })).trim();
 
-    config.chains[name] = { triggers, steps, maxRounds, project };
-    log(`Chain ${name}: ${describeChain(config.chains[name]!)}`);
-    more = await ui.confirm('Create another chain?', false);
+    config.workflows[name] = { triggers, steps, maxRounds, project };
+    log(`Workflow ${name}: ${describeWorkflow(config.workflows[name]!)}`);
+    more = await ui.confirm('Create another workflow?', false);
   }
 }
 
 const usage = `voidshift agents <command>
-  status                     Chains, projects and the runner
+  status                     Workflows, projects and the runner
   key                        Store or replace the Linear API key
-  run [CARD]                 Run the chain once now, in this terminal
+  run [CARD]                 Run the workflow once now, in this terminal
   start | stop               Start or stop the background runner`;
 
 const agents: Tool = {
@@ -296,10 +296,10 @@ const agents: Tool = {
     }
 
     await setupProjects(ui, config, ctx.log);
-    await setupChains(ui, config, await linear().teams(), ctx.log);
+    await setupWorkflows(ui, config, await linear().teams(), ctx.log);
     writeAgentsConfig(ctx.configDir, config);
 
-    if (Object.keys(config.chains).length && (await ui.confirm('Start the background runner now? It checks Linear every minute for cards that start your chains.'))) {
+    if (Object.keys(config.workflows).length && (await ui.confirm('Start the background runner now? It checks Linear every minute for cards that start your workflows.'))) {
       const ok = startRunner(ctx.home, [...ctx.selfCommand, 'agents', 'tick'], join(agentsDir(ctx.configDir), 'runner.log'));
       ctx.log(ok ? 'Runner started.' : 'Could not start the runner. Try voidshift agents start.');
     }
@@ -333,14 +333,14 @@ const agents: Tool = {
       checks.push({ name: 'Linear', status: 'fail', detail: (err as Error).message, fix: 'voidshift agents key' });
     }
     const config = readAgentsConfig(ctx.configDir);
-    const chains = Object.entries(config.chains);
-    const broken = chains.filter(([, c]) => !config.projects[c.project] || !existsSync(join(config.projects[c.project]!.path, '.git'))).map(([n]) => n);
+    const workflows = Object.entries(config.workflows);
+    const broken = workflows.filter(([, c]) => !config.projects[c.project] || !existsSync(join(config.projects[c.project]!.path, '.git'))).map(([n]) => n);
     checks.push(
-      !chains.length
-        ? { name: 'agent chains', status: 'warn', detail: 'none yet', fix: 'voidshift' }
+      !workflows.length
+        ? { name: 'agent workflows', status: 'warn', detail: 'none yet', fix: 'voidshift' }
         : broken.length
-          ? { name: 'agent chains', status: 'fail', detail: `${broken.join(', ')} point at a missing project`, fix: 'voidshift' }
-          : { name: 'agent chains', status: 'ok', detail: `${chains.length} ready` },
+          ? { name: 'agent workflows', status: 'fail', detail: `${broken.join(', ')} point at a missing project`, fix: 'voidshift' }
+          : { name: 'agent workflows', status: 'ok', detail: `${workflows.length} ready` },
     );
     checks.push(
       runnerLoaded()
@@ -355,8 +355,8 @@ const agents: Tool = {
       const c = readAgentsConfig(ctx.configDir);
       ctx.log(`Engine: ${c.engine}`);
       for (const [n, p] of Object.entries(c.projects)) ctx.log(`Project ${n}: ${tilde(p.path)}${p.uiUrl ? `, app at ${p.uiUrl}` : ''}`);
-      for (const [n, ch] of Object.entries(c.chains)) ctx.log(`Chain ${n}: ${describeChain(ch)}`);
-      if (!Object.keys(c.chains).length) ctx.log('No chains yet. Run voidshift to create one.');
+      for (const [n, ch] of Object.entries(c.workflows)) ctx.log(`Workflow ${n}: ${describeWorkflow(ch)}`);
+      if (!Object.keys(c.workflows).length) ctx.log('No workflows yet. Run voidshift to create one.');
       ctx.log(`Runner: ${runnerLoaded() ? 'running' : 'stopped'}${existsSync(join(agentsDir(ctx.configDir), 'runner.lock')) ? ', working on a card now' : ''}`);
       return 0;
     },
@@ -380,12 +380,12 @@ const agents: Tool = {
     },
 
     async start(_args, ctx) {
-      if (!Object.keys(readAgentsConfig(ctx.configDir).chains).length) {
-        ctx.log('Create a chain first: run voidshift.');
+      if (!Object.keys(readAgentsConfig(ctx.configDir).workflows).length) {
+        ctx.log('Create a workflow first: run voidshift.');
         return 1;
       }
       const ok = startRunner(ctx.home, [...ctx.selfCommand, 'agents', 'tick'], join(agentsDir(ctx.configDir), 'runner.log'));
-      ctx.log(ok ? 'Runner started. It checks Linear every minute for cards that start your chains.' : 'Could not start the runner.');
+      ctx.log(ok ? 'Runner started. It checks Linear every minute for cards that start your workflows.' : 'Could not start the runner.');
       return ok ? 0 : 1;
     },
 
