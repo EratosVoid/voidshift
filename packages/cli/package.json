@@ -40,11 +40,11 @@
     "provenance": true
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "rm -rf dist && tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --test test/*.test.ts",
     "dev": "node src/main.ts",
-    "prepublishOnly": "tsc -p tsconfig.json"
+    "prepublishOnly": "rm -rf dist && tsc -p tsconfig.json"
   },
   "dependencies": {
     "@clack/prompts": "^1.8.1"
