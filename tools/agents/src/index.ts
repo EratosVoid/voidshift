@@ -7,6 +7,7 @@ import { STEPS, agentsDir, allChains, describeChain, readAgentsConfig, writeAgen
 import { looksLikeLinearKey, readLinearKey, storeLinearKey } from './keychain.ts';
 import { runnerLoaded, startRunner, stopRunner } from './launchd.ts';
 import { createLinear } from './linear.ts';
+import { findRepos } from './repos.ts';
 import { tick } from './runner.ts';
 import type { Check, Tool, ToolContext, Ui } from './types.ts';
 
@@ -148,18 +149,18 @@ async function setupProjects(ui: Ui, config: AgentsConfig, log: (l: string) => v
   else log('A project is a repo on this Mac where agents do the work. Add one now; triggers point at it.');
   let more = names.length === 0 || (await ui.confirm('Add a project?', false));
   while (more) {
-    const cwd = process.cwd();
-    const path = resolve(
-      expandHome(
-        (
-          await ui.text('Where is the repo?', {
-            initial: existsSync(join(cwd, '.git')) ? cwd : undefined,
-            placeholder: '~/code/my-app',
-            validate: (v) => (existsSync(join(expandHome(v.trim()), '.git')) ? undefined : 'Not a git repository'),
-          })
-        ).trim(),
-      ),
+    const isRepo = (v: string) => (existsSync(join(expandHome(v.trim()), '.git')) ? undefined : 'Not a git repository');
+    const repos = findRepos([process.cwd()]);
+    const TYPE = '__type__';
+    const picked = await ui.search(
+      'Which repo? Type to search.',
+      [
+        ...repos.map((r) => ({ value: r, label: r.split('/').pop() ?? r, hint: tilde(r) })),
+        { value: TYPE, label: 'Enter a path...', hint: 'not in the list' },
+      ],
+      'repo name',
     );
+    const path = resolve(expandHome(picked === TYPE ? (await ui.path('Repo path', { initial: homedir() + '/', validate: isRepo })).trim() : picked));
     const name = (await ui.text('Name for this project', { initial: path.split('/').pop(), validate: (v) => (v.trim() ? undefined : 'Required') })).trim();
     const url = (await ui.text('URL where the app runs, for the browser check (leave empty to skip)', { placeholder: 'http://localhost:3000' })).trim();
     config.projects[name] = { path, uiUrl: url || undefined };

@@ -29,4 +29,18 @@ export const ui: Ui = {
   async multiselect<T extends string>(message: string, choices: Choice<T>[], initial: T[] = []) {
     return unwrap(await p.multiselect<T>({ message, options: choices as never, initialValues: initial, required: false }));
   },
+  async search<T extends string>(message: string, choices: Choice<T>[], placeholder?: string) {
+    return unwrap(
+      await p.autocomplete<T>({
+        message,
+        options: choices as never,
+        placeholder,
+        maxItems: 8,
+        filter: (q, o) => `${o.label ?? ''} ${o.hint ?? ''}`.toLowerCase().includes(q.toLowerCase()),
+      }),
+    );
+  },
+  async path(message, o = {}) {
+    return unwrap(await p.path({ message, directory: true, initialValue: o.initial, validate: o.validate ? (v) => o.validate!(v ?? '') : undefined }));
+  },
 };
