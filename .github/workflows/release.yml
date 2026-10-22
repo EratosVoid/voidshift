@@ -34,6 +34,9 @@ jobs:
           done
       - run: pnpm release:prepare
       - name: Publish
+        # NPM_TOKEN is only needed until a package has a trusted publisher on npm.
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           for dir in tools/awake tools/agents tools/memory packages/cli; do
             name=$(node -p "require('./$dir/package.json').name")
