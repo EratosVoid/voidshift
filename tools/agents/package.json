@@ -1,6 +1,6 @@
 {
-  "name": "@devvoid/voidshift-agents",
-  "version": "0.3.0",
+  "name": "@voidlabs.gg/voidshift-agents",
+  "version": "0.4.0",
   "description": "Agents for Claude Code and Codex that plan, build and QA Linear cards, chained and run in the background.",
   "license": "Apache-2.0",
   "repository": {
@@ -8,7 +8,7 @@
     "url": "git+https://github.com/EratosVoid/voidshift.git",
     "directory": "tools/agents"
   },
-  "homepage": "https://github.com/EratosVoid/voidshift#readme",
+  "homepage": "https://voidlabs.gg",
   "bugs": {
     "url": "https://github.com/EratosVoid/voidshift/issues"
   },

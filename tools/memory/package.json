@@ -1,6 +1,6 @@
 {
-  "name": "@devvoid/voidshift-memory",
-  "version": "0.3.0",
+  "name": "@voidlabs.gg/voidshift-memory",
+  "version": "0.4.0",
   "description": "A markdown memory vault recalled into Claude Code and Codex before every prompt.",
   "license": "Apache-2.0",
   "repository": {
@@ -8,7 +8,7 @@
     "url": "git+https://github.com/EratosVoid/voidshift.git",
     "directory": "tools/memory"
   },
-  "homepage": "https://github.com/EratosVoid/voidshift#readme",
+  "homepage": "https://voidlabs.gg",
   "bugs": {
     "url": "https://github.com/EratosVoid/voidshift/issues"
   },

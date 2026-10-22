@@ -8,7 +8,7 @@ from the command line.
 > Early release. macOS only for now; Windows and Linux are next.
 
 ```sh
-npm i -g @devvoid/voidshift
+npm i -g @voidlabs.gg/voidshift
 vsf setup              # pick tools and set them up
 vsf setup --defaults   # take every default, ask only what has none
 vsf                    # what every tool is doing (first run: setup)

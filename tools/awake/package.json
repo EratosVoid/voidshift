@@ -1,6 +1,6 @@
 {
-  "name": "@devvoid/voidshift-awake",
-  "version": "0.3.0",
+  "name": "@voidlabs.gg/voidshift-awake",
+  "version": "0.4.0",
   "description": "Keep a Mac running on battery with the lid closed, with guardrails.",
   "license": "Apache-2.0",
   "repository": {
@@ -8,7 +8,7 @@
     "url": "git+https://github.com/EratosVoid/voidshift.git",
     "directory": "tools/awake"
   },
-  "homepage": "https://github.com/EratosVoid/voidshift#readme",
+  "homepage": "https://voidlabs.gg",
   "bugs": {
     "url": "https://github.com/EratosVoid/voidshift/issues"
   },

@@ -13,19 +13,19 @@ export const registry: ToolEntry[] = [
   {
     name: 'awake',
     summary: 'Keep the Mac running on battery with the lid closed, with guardrails',
-    pkg: '@devvoid/voidshift-awake',
+    pkg: '@voidlabs.gg/voidshift-awake',
     status: 'available',
   },
   {
     name: 'agents',
     summary: 'Agents for Claude Code and Codex that plan, build and QA Linear cards',
-    pkg: '@devvoid/voidshift-agents',
+    pkg: '@voidlabs.gg/voidshift-agents',
     status: 'available',
   },
   {
     name: 'memory',
     summary: 'Markdown memory vault recalled into Claude Code and Codex',
-    pkg: '@devvoid/voidshift-memory',
+    pkg: '@voidlabs.gg/voidshift-memory',
     status: 'available',
   },
 ];

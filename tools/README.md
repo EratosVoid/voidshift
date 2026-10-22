@@ -1,7 +1,7 @@
 # Tools
 
 Each folder here is one tool the `voidshift` CLI can add, published as its own
-`@devvoid/voidshift-<name>` package and pulled in on `voidshift add <name>`.
+`@voidlabs.gg/voidshift-<name>` package and pulled in on `voidshift add <name>`.
 
 A tool implements the contract in `packages/cli/src/tool.ts`: install,
 uninstall, and health checks that `voidshift doctor` runs.

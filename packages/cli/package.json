@@ -1,6 +1,6 @@
 {
-  "name": "@devvoid/voidshift",
-  "version": "0.3.0",
+  "name": "@voidlabs.gg/voidshift",
+  "version": "0.4.0",
   "description": "One CLI for the Void dev tools: keep your Mac awake, run agents in the background, shared skills and memory for Claude Code and Codex.",
   "license": "Apache-2.0",
   "repository": {
@@ -8,7 +8,7 @@
     "url": "git+https://github.com/EratosVoid/voidshift.git",
     "directory": "packages/cli"
   },
-  "homepage": "https://github.com/EratosVoid/voidshift#readme",
+  "homepage": "https://voidlabs.gg",
   "bugs": {
     "url": "https://github.com/EratosVoid/voidshift/issues"
   },

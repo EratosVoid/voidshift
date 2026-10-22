@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 
-export const CLI_PKG = '@devvoid/voidshift';
+export const CLI_PKG = '@voidlabs.gg/voidshift';
 
 export function cliVersion(): string {
   return JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
