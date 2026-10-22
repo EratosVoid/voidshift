@@ -65,7 +65,7 @@ test('key map and tab keys', () => {
 test('cancel dialog text matches the design', () => {
   const s = cancelSpec('ENG-1412', 'QA');
   assert.equal(s.title, 'Cancel ENG-1412?');
-  assert.equal(s.body, 'Stops the QA agent now. The card loses vs-working and gets a comment; add vs-plan again to restart it.');
+  assert.equal(s.body, 'Stops the QA agent now. The card loses its VoidShift labels and gets a comment; add vs-plan again to restart it.');
   assert.deepEqual(s.args, ['agents', 'cancel', 'ENG-1412']);
   assert.equal(s.confirmLabel, 'Cancel card');
   assert.equal(s.cancelLabel, 'Keep running');

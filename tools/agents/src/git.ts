@@ -49,13 +49,21 @@ export function commitsAhead(worktree: string, base: string): number {
   return out.ok ? Number(out.stdout) : 0;
 }
 
+export function headSha(worktree: string): string {
+  return sh('git', ['rev-parse', 'HEAD'], worktree).stdout;
+}
+
 export function push(worktree: string, branch: string): void {
   must(sh('git', ['push', '-u', 'origin', branch], worktree), 'git push');
 }
 
+// The branch's open pull request. A closed one is reopened, since a closed PR
+// never runs CI on new commits; a merged one gets a fresh PR.
 export function ensureDraftPr(worktree: string, branch: string, base: string, title: string, body: string): string {
-  const view = sh('gh', ['pr', 'view', branch, '--json', 'url', '-q', '.url'], worktree);
-  if (view.ok && view.stdout) return view.stdout;
+  const view = sh('gh', ['pr', 'view', branch, '--json', 'url,state', '-q', '.state + " " + .url'], worktree);
+  const [state, url] = view.ok ? view.stdout.split(' ') : [];
+  if (state === 'OPEN' && url) return url;
+  if (state === 'CLOSED' && url && sh('gh', ['pr', 'reopen', branch], worktree).ok) return url;
   return must(
     sh('gh', ['pr', 'create', '--draft', '--base', base, '--head', branch, '--title', title, '--body', body], worktree),
     'gh pr create',
@@ -95,7 +103,29 @@ export function ciReport(s: CheckSummary): string {
 
 // Waits for CI on the PR, then reads the final state once. Repos without CI
 // pass through as SKIP.
-export function waitForChecks(worktree: string, branch: string, timeoutMs = 30 * 60_000): Promise<{ verdict: 'SHIP' | 'FIX' | 'SKIP'; report: string }> {
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// True once GitHub shows `sha` as the head of the branch's pull request, so the
+// checks read next belong to that commit and not to an older push.
+export async function waitForPrHead(worktree: string, branch: string, sha: string, timeoutMs = 3 * 60_000): Promise<boolean> {
+  const until = Date.now() + timeoutMs;
+  for (;;) {
+    const head = sh('gh', ['pr', 'view', branch, '--json', 'headRefOid', '-q', '.headRefOid'], worktree);
+    if (head.ok && head.stdout === sha) return true;
+    if (Date.now() > until) return false;
+    await sleep(10_000);
+  }
+}
+
+// CI for the pull request's current head. Checks take a moment to register
+// after a push, so "no checks" only counts once they have had time to show up.
+export async function waitForChecks(worktree: string, branch: string, timeoutMs = 30 * 60_000, settleMs = 2 * 60_000): Promise<{ verdict: 'SHIP' | 'FIX' | 'SKIP'; report: string }> {
+  const settled = Date.now() + settleMs;
+  const noChecks = () => {
+    const out = sh('gh', ['pr', 'checks', branch], worktree);
+    return /no checks reported/i.test(`${out.stdout}\n${out.stderr}`);
+  };
+  while (Date.now() < settled && noChecks()) await sleep(15_000);
   return new Promise((resolve) => {
     const child = spawn('gh', ['pr', 'checks', branch, '--watch', '--interval', '30'], { cwd: worktree, stdio: ['ignore', 'pipe', 'pipe'] });
     track(child);

@@ -24,7 +24,8 @@ const CLAUDE_READ = ['Read', 'Glob', 'Grep', 'Bash(git diff:*)', 'Bash(git log:*
 
 export function engineArgs(o: RunOptions, outFile: string): { cmd: string; args: string[] } {
   if (o.engine === 'claude') {
-    const vaultTools = o.vault ? [`Edit(/${o.vault}/**)`, `Write(/${o.vault}/**)`] : [];
+    // Edit rules cover every file-writing tool; a Write(path) rule is ignored.
+    const vaultTools = o.vault ? [`Edit(/${o.vault}/**)`] : [];
     const args = ['-p', '--output-format', 'text', '--allowedTools', [...(o.write ? CLAUDE_WRITE : CLAUDE_READ), ...vaultTools].join(',')];
     if (o.vault) args.push('--add-dir', o.vault);
     if (o.write) args.push('--permission-mode', 'acceptEdits');

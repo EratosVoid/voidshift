@@ -4,6 +4,8 @@ import {
   buildPrompt,
   findingsFor,
   isRoundLabel,
+  isStatusLabel,
+  stageLabels,
   latestPlan,
   parseDevResult,
   parseVerdict,
@@ -62,6 +64,19 @@ test('round labels', () => {
   assert.ok(isRoundLabel('vs-dev-v2'));
   assert.ok(isRoundLabel('vs-qa-v10'));
   assert.ok(!isRoundLabel('vs-plan'));
+});
+
+test('a card keeps one stage label and one version label', () => {
+  const old = ['Feature', 'vs-start', 'vs-working', 'vs-plan-v1', 'vs-qa-v1', 'vs-dev-v1', 'vs-qa-v7', 'vs-v1', 'vs-planning'];
+  assert.deepEqual(stageLabels(old, 'vs-start', 'vs-dev', 2), ['Feature', 'vs-dev', 'vs-v2']);
+  assert.deepEqual(stageLabels(['Feature', 'vs-dev', 'vs-v2'], 'vs-start', 'vs-qa', 2), ['Feature', 'vs-qa', 'vs-v2']);
+  assert.deepEqual(stageLabels(['Feature', 'vs-qa', 'vs-v3'], 'vs-start', 'vs-parked', 3), ['Feature', 'vs-parked', 'vs-v3']);
+  assert.deepEqual(stageLabels(['vs-start'], 'vs-start', 'vs-planning'), ['vs-planning']);
+});
+
+test('status labels never include the trigger labels people use', () => {
+  for (const l of ['vs-planning', 'vs-plan-review', 'vs-dev', 'vs-qa', 'vs-v4', 'vs-parked', 'vs-qa-verified', 'vs-working']) assert.ok(isStatusLabel(l), l);
+  for (const l of ['vs-plan', 'vs-start', 'Feature']) assert.ok(!isStatusLabel(l), l);
 });
 
 test('prompt inlines the skill body without frontmatter', () => {

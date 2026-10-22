@@ -147,7 +147,7 @@ export function cancelSpec(card: string, stepLabel?: string): ActionSpec {
   return {
     args: ['agents', 'cancel', card],
     title: `Cancel ${card}?`,
-    body: `Stops the ${stepLabel || 'running'} agent now. The card loses vs-working and gets a comment; add vs-plan again to restart it.`,
+    body: `Stops the ${stepLabel || 'running'} agent now. The card loses its VoidShift labels and gets a comment; add vs-plan again to restart it.`,
     confirmLabel: 'Cancel card',
     cancelLabel: 'Keep running',
     done: `${card} cancelled`,

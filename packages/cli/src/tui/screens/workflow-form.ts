@@ -450,7 +450,7 @@ function WorkflowForm(props: { params: Record<string, unknown> }): React.ReactEl
             Text,
             null,
             h(Text, { bold: where === 'rounds', color: where === 'rounds' ? theme.accent : undefined }, ` ${form.rounds} `),
-            h(Text, { color: theme.dim }, '  times a failed check sends the work back before parking'),
+            h(Text, { color: theme.dim }, '  tries at Plan or Dev before the card parks'),
           )
         : h(Text, { color: theme.dim }, '1   fixed: no step here can be sent back'),
     ),

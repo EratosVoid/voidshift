@@ -5,17 +5,38 @@ export const PLAN_HEADING = '## Plan';
 // Plans posted before 0.1.5 used this heading; still read them.
 const OLD_PLAN_HEADING = '## VoidShift plan';
 
+// A card carries at most two VoidShift labels: one stage label (which agent has
+// it, or how it ended) and one version label (which round it is on).
 export const LABELS = {
-  working: 'vs-working',
+  stage: {
+    'vs-plan': 'vs-planning',
+    'vs-plan-review': 'vs-plan-review',
+    'vs-publish': 'vs-publish',
+    'vs-dev': 'vs-dev',
+    'vs-qa': 'vs-qa',
+  } as Record<string, string>,
   changes: 'vs-changes-requested',
   verified: 'vs-qa-verified',
   parked: 'vs-parked',
-  plan: (round: number) => `vs-plan-v${round}`,
-  dev: (round: number) => `vs-dev-v${round}`,
-  qa: (round: number) => `vs-qa-v${round}`,
+  version: (round: number) => `vs-v${round}`,
+  // Labels from earlier runners, still cleaned off cards.
+  working: 'vs-working',
 };
 
-export const isRoundLabel = (name: string) => /^vs-(plan|dev|qa)-v\d+$/.test(name);
+const STAGE_NAMES = new Set([...Object.values(LABELS.stage), LABELS.changes, LABELS.verified, LABELS.parked, LABELS.working]);
+
+export const isVersionLabel = (name: string) => /^vs-v\d+$/.test(name);
+// Round labels earlier runners stacked up, one per step and round.
+export const isRoundLabel = (name: string) => /^vs-(plan|review|dev|qa)-v\d+$/.test(name);
+
+export const isStatusLabel = (name: string) => STAGE_NAMES.has(name) || isVersionLabel(name) || isRoundLabel(name);
+
+// The card's labels with every VoidShift label (and the trigger) replaced by
+// one stage label and, when given, one version label.
+export function stageLabels(current: string[], trigger: string, stage: string, round?: number): string[] {
+  const kept = current.filter((l) => l !== trigger && !isStatusLabel(l));
+  return [...new Set([...kept, stage, ...(round ? [LABELS.version(round)] : [])])];
+}
 
 export type Verdict = 'SHIP' | 'FIX' | 'SKIP';
 

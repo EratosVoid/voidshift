@@ -187,7 +187,7 @@ test('cancelCard queues a pending entry when Linear fails', async () => {
   const { configDir } = setup({});
   const linear = { card: async () => { throw new Error('down'); } } as unknown as Linear;
   assert.equal(await cancelCard(linear, configDir, 'ENG-1', 'go'), false);
-  assert.deepEqual(readPending(configDir), [{ card: 'ENG-1', comment: '**Cancelled.** Add `go` again to restart.', drop: ['vs-working'], add: [] }]);
+  assert.deepEqual(readPending(configDir), [{ card: 'ENG-1', comment: '**Cancelled.** Add `go` again to restart.', drop: [], add: [], dropStatus: true }]);
 });
 
 test('an unexpected error is logged as one line and returns 1', async () => {

@@ -7,18 +7,19 @@ import {
   buildPrompt,
   findingsFor,
   fixTarget,
-  isRoundLabel,
+  isStatusLabel,
   latestPlan,
   parseDevResult,
   parseVerdict,
   planBody,
   qaPassed,
+  stageLabels,
   verdictBlock,
   type StepResult,
 } from './workflow.ts';
 import { STEPS, agentsDir, hasWork, isProducer, type AgentsConfig, type Workflow, type Project, type StepId, type Trigger } from './config.ts';
 import { runAgent, stopAgents } from './engine.ts';
-import { commitsAhead, defaultBranch, ensureDraftPr, ensureWorktree, markReady, push, resetWorktree, waitForChecks } from './git.ts';
+import { commitsAhead, defaultBranch, ensureDraftPr, ensureWorktree, headSha, markReady, push, resetWorktree, waitForChecks, waitForPrHead } from './git.ts';
 import type { Card, Linear } from './linear.ts';
 import { recall, vaultPath } from './memory.ts';
 import { bootTime, clearCurrent, isPaused, ours, readCurrent, readPending, writeCurrent, writePending, writeRun, type Pending, type RunRecord, type StepRecord } from './state.ts';
@@ -42,8 +43,6 @@ function withLabels(card: Card, drop: (l: string) => boolean, add: string[]): st
   return [...new Set([...card.labels.filter((l) => !drop(l)), ...add])];
 }
 
-const statusLabel = (l: string) =>
-  l === LABELS.working || l === LABELS.verified || l === LABELS.parked || l === LABELS.changes || isRoundLabel(l);
 
 const UNATTENDED = `# Running unattended
 
@@ -113,18 +112,35 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
     return outcome;
   };
 
+  // Shown on the card as the version label and in the lock as the round.
+  const setRound = (n: number) => {
+    loops = n;
+  };
+  const stage = (name: string, round?: number) => linear.setLabels(card, stageLabels(card.labels, trigger.label, name, round));
+  // Linear hears from the runner twice: the plan once it has passed review,
+  // and one final comment. Findings stay here until the final one.
+  let lastFindings = '';
+  let planToPost: string | null = null;
+  const postPlan = async () => {
+    if (planToPost === null) return;
+    await linear.comment(card, `${PLAN_HEADING}\n\n${planToPost}`);
+    planToPost = null;
+  };
+
   async function park(reason: string): Promise<'parked'> {
     say(`parked: ${reason}`);
-    const comment = `**Parked:** ${reason}\n\nFix the cause, then add \`${trigger.label}\` again to retry.`;
+    const comment = `**Parked:** ${reason}${lastFindings ? `\n\n${lastFindings}` : ''}\n\nFix the cause, then add \`${trigger.label}\` again to retry.`;
+    const add = [LABELS.parked, ...(loops ? [LABELS.version(loops)] : [])];
     let commented = false;
     try {
+      await postPlan();
       await linear.comment(card, comment);
       commented = true;
-      await linear.setLabels(card, withLabels(card, (l) => l === trigger.label || l === LABELS.working, [LABELS.parked]));
+      await linear.setLabels(card, stageLabels(card.labels, trigger.label, LABELS.parked, loops || undefined));
     } catch (err) {
       say(`could not reach Linear to park it (${(err as Error).message}). Will retry next minute.`);
       // An empty comment is skipped on retry, so it is not posted twice.
-      writePending(rc.configDir, [...readPending(rc.configDir), { card: card.identifier, comment: commented ? '' : comment, drop: [trigger.label, LABELS.working], add: [LABELS.parked] }]);
+      writePending(rc.configDir, [...readPending(rc.configDir), { card: card.identifier, comment: commented ? '' : comment, drop: [trigger.label], add, dropStatus: true }]);
     }
     return done('parked', reason);
   }
@@ -140,7 +156,7 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
       throw new Park('No plan comment (starting with "## Plan") was found. Publish a plan first, or start the workflow with Plan.');
     }
 
-    await linear.setLabels(card, withLabels(card, (l) => l === trigger.label || statusLabel(l), [LABELS.working]));
+    await stage(LABELS.stage[steps[from]!]!);
     const base = project.base || defaultBranch(project.path);
     const vault = vaultPath(rc.configDir);
     const known = [recall(rc.selfCommand, rc.configDir, `${workflow.project} ${card.title}\n${card.description ?? ''}`), vault ? memoryNote(vault) : ''].filter(Boolean).join('\n\n');
@@ -149,13 +165,14 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
     say(`working in ${worktree} on ${card.branchName}`);
 
     const findings = new Map<number, string>();
-    const runs = { plan: 0, dev: 0, qa: 0 };
+    const runs = { plan: 0, dev: 0 };
     let prUrl = '';
+    let logs = 0;
     const planText = () => plan ?? '(No plan was posted on this card. Check the work against the card itself.)';
     const timeoutMs = config.timeoutMinutes * 60_000;
-    const logFile = (name: string) => join(runDir, `${String(runs.plan + runs.dev + runs.qa).padStart(2, '0')}-${name}.log`);
+    const logFile = (name: string) => join(runDir, `${String(logs++).padStart(2, '0')}-${name}.log`);
 
-    async function check(step: StepId): Promise<StepResult> {
+    async function check(step: StepId, round: number): Promise<StepResult> {
       const label = STEPS[step].label;
       const rec = begin(step);
       let ciNote = '';
@@ -164,8 +181,13 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
           end(rec, 'SKIP', 'No changes on the branch yet.');
           return { step: label, verdict: 'SKIP', report: 'No changes on the branch yet.' };
         }
-        // CI first, without an agent: a red build goes straight back.
+        // CI first, without an agent: a red build goes straight back. Only
+        // checks for the commit just pushed count, never an older push's.
         if (prUrl) {
+          const sha = headSha(worktree);
+          if (!(await waitForPrHead(worktree, card.branchName, sha))) {
+            throw new Park(`GitHub never showed commit ${sha.slice(0, 9)} on the pull request, so its CI could not be read. PR: ${prUrl}`);
+          }
           const ci = await waitForChecks(worktree, card.branchName);
           if (ci.verdict === 'FIX') {
             end(rec, 'FIX', ci.report);
@@ -177,7 +199,7 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
       const log = logFile(step);
       const r = await runAgent({
         engine: config.engine, model: config.models.review, cwd: worktree, vault, write: step === 'vs-qa', logFile: log, timeoutMs,
-        prompt: buildPrompt({ skill: skill(step), card, plan: planText(), base, round: runs.qa + 1, extra: [known, ciNote, UNATTENDED].filter(Boolean).join('\n\n') }),
+        prompt: buildPrompt({ skill: skill(step), card, plan: planText(), base, round, extra: [known, ciNote, UNATTENDED].filter(Boolean).join('\n\n') }),
       });
       if (step === 'vs-qa') resetWorktree(worktree);
       const verdict = parseVerdict(r.output);
@@ -192,29 +214,41 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
 
       if (isVerdict(step)) {
         const [start, end] = verdictBlock(steps, i, isVerdict);
+        const target = fixTarget(steps, start, isProducer);
+        const producer = target >= 0 ? steps[target] : undefined;
+        // The round being checked: how many times its producer has run.
+        const round = Math.max(producer === 'vs-plan' ? runs.plan : runs.dev, 1);
+        setRound(round);
         const results: StepResult[] = [];
-        for (const s of steps.slice(start, end)) results.push(await check(s));
-        runs.qa++;
-        await linear.setLabels(card, withLabels(card, () => false, [LABELS.qa(runs.qa)]));
+        for (const s of steps.slice(start, end)) {
+          await stage(LABELS.stage[s]!, round);
+          results.push(await check(s, round));
+        }
         if (qaPassed(results)) {
           i = end;
           continue;
         }
         const notes = findingsFor(results);
-        await linear.comment(card, `**Changes needed (round ${runs.qa}).**\n\n${notes}`);
-        const target = fixTarget(steps, start, isProducer);
+        lastFindings = `**Latest findings (round ${round}).**\n\n${notes}`;
         if (target < 0) {
-          await linear.setLabels(card, withLabels(card, (l) => l === LABELS.working, [LABELS.changes]));
+          await postPlan();
+          await linear.comment(card, `**Changes needed.**\n\n${notes}`);
+          await linear.setLabels(card, stageLabels(card.labels, trigger.label, LABELS.changes, round));
           say('changes requested');
           return done('changes');
         }
-        if (++loops > workflow.maxRounds) throw new Park(`Checks still failed after sending the work back ${workflow.maxRounds} times. Latest findings are in the comment above.${prUrl ? ` PR: ${prUrl}` : ''}`);
+        // Rounds caps how many times Plan or Dev runs, counting the first.
+        if (round >= workflow.maxRounds) {
+          throw new Park(`Checks still failed after ${round} ${producer === 'vs-plan' ? 'plan' : 'dev'} rounds.${prUrl ? ` PR: ${prUrl}` : ''}`);
+        }
         findings.set(target, notes);
         i = target;
         continue;
       }
 
       if (step === 'vs-plan') {
+        setRound(runs.plan + 1);
+        await stage(LABELS.stage[step]!, runs.plan + 1);
         const rec = begin(step);
         const log = logFile('plan');
         const r = await runAgent({
@@ -225,16 +259,20 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
         end(rec, result.status === 'blocked' ? 'blocked' : 'done', r.output, log);
         if (result.status === 'blocked') throw new Park(`The plan agent stopped: ${result.reason}`);
         plan = planBody(r.output);
-        await linear.comment(card, `${PLAN_HEADING}\n\n${plan}`);
+        planToPost = plan;
         runs.plan++;
-        await linear.setLabels(card, withLabels(card, () => false, [LABELS.plan(runs.plan)]));
       } else if (step === 'vs-publish') {
+        await postPlan();
         const rec = begin(step);
         push(worktree, card.branchName);
         end(rec, 'pushed');
       } else if (step === 'vs-dev') {
+        await postPlan();
+        setRound(runs.dev + 1);
+        await stage(LABELS.stage[step]!, runs.dev + 1);
         const rec = begin(step);
         const log = logFile('dev');
+        const before = headSha(worktree);
         const dev = await runAgent({
           engine: config.engine, model: config.models.dev, cwd: worktree, vault, write: true, logFile: log, timeoutMs,
           prompt: buildPrompt({ skill: skill('vs-dev'), card, plan: planText(), base, round: runs.dev + 1, findings: findings.get(i), extra: [known, UNATTENDED].filter(Boolean).join('\n\n') }),
@@ -243,23 +281,26 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
         end(rec, result.status === 'blocked' ? 'blocked' : 'done', dev.output, log);
         if (result.status === 'blocked') throw new Park(`The dev agent stopped: ${result.reason}`);
         if (commitsAhead(worktree, base) === 0) throw new Park('The dev agent made no commits.');
+        // A round sent back with findings must change something, or QA would
+        // just check the same commit again.
+        if (runs.dev > 0 && headSha(worktree) === before) throw new Park('The dev agent made no new commits this round.');
         push(worktree, card.branchName);
         prUrl = ensureDraftPr(worktree, card.branchName, base, `${card.identifier}: ${card.title}`, card.url);
         record.prUrl = prUrl;
         save();
         runs.dev++;
-        await linear.setLabels(card, withLabels(card, () => false, [LABELS.dev(runs.dev)]));
       }
       findings.delete(i);
       i++;
     }
 
+    await postPlan();
     let moved = false;
     if (hasWork(workflow)) {
       markReady(worktree, card.branchName);
       moved = await linear.moveTo(card, config.reviewState);
     }
-    await linear.setLabels(card, withLabels(card, (l) => l === LABELS.working, [LABELS.verified]));
+    await linear.setLabels(card, stageLabels(card.labels, trigger.label, LABELS.verified, loops || undefined));
     await linear.comment(card, `**All checks passed.**${prUrl ? ` PR ready: ${prUrl}` : ''}${hasWork(workflow) && !moved ? `\n\n(No "${config.reviewState}" state on this team, so the card was not moved.)` : ''}`);
     say('verified');
     return done('verified');
@@ -297,7 +338,7 @@ async function flushPending(rc: RunContext): Promise<void> {
         await rc.linear.comment(card, p.comment);
         p.comment = '';
       }
-      await rc.linear.setLabels(card, withLabels(card, (l) => p.drop.includes(l), p.add));
+      await rc.linear.setLabels(card, withLabels(card, (l) => p.drop.includes(l) || (!!p.dropStatus && isStatusLabel(l)), p.add));
     } catch {
       left.push(p);
     }
@@ -315,7 +356,7 @@ export async function cancelCard(linear: Linear, configDir: string, cardId: stri
   const comment = `**Cancelled.** Add \`${label}\` again to restart.`;
   try {
     const card = await linear.card(cardId);
-    await linear.setLabels(card, withLabels(card, (l) => l === LABELS.working, []));
+    await linear.setLabels(card, withLabels(card, isStatusLabel, []));
     await linear.comment(card, comment);
     return true;
   } catch {
@@ -328,7 +369,7 @@ function queueCancel(configDir: string, cardId: string, comment: string): void {
   const pending = readPending(configDir);
   if (pending.some((p) => p.card === cardId && p.comment === comment)) return;
   try {
-    writePending(configDir, [...pending, { card: cardId, comment, drop: [LABELS.working], add: [] }]);
+    writePending(configDir, [...pending, { card: cardId, comment, drop: [], add: [], dropStatus: true }]);
   } catch {
     // nothing more to do
   }

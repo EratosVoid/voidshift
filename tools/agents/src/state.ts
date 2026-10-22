@@ -86,6 +86,8 @@ export interface Pending {
   // Labels to drop and add on the card's labels as they are then.
   drop: string[];
   add: string[];
+  // Also drop every VoidShift status label the card carries then.
+  dropStatus?: boolean;
 }
 
 const pendingPath = (configDir: string) => join(agentsDir(configDir), 'pending.json');

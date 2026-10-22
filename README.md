@@ -59,8 +59,10 @@ when ENG + vs-plan:  Dev → QA  in tether-relay
 ```
 
 The runner checks Linear every minute, works in its own copy of the repo so
-your checkout is never touched, and labels the card as it goes (`vs-dev-v1`,
-`vs-qa-v1`, then `vs-qa-verified` or `vs-parked` with a comment saying why).
+your checkout is never touched, and keeps two labels on the card as it goes: the
+stage (`vs-planning`, `vs-plan-review`, `vs-dev`, `vs-qa`, then `vs-qa-verified`
+or `vs-parked`) and the round (`vs-v1`, `vs-v2`). On Linear it posts the plan and
+one final comment, nothing in between.
 
 ```sh
 vsf agents status                  # runner, the card in progress, parked cards

@@ -8,7 +8,7 @@ import { isPaused, listRuns, ours, clearCurrent, liveCurrent, readCurrent, setPa
 import { plistPath, runnerLoaded, startRunner, stopRunner } from './launchd.ts';
 import { createLinear } from './linear.ts';
 import { parseStep, resolveName, stepNames } from './names.ts';
-import { LABELS, isRoundLabel } from './workflow.ts';
+import { isStatusLabel } from './workflow.ts';
 import { cancelCard, tick } from './runner.ts';
 import type { Linear } from './linear.ts';
 import type { Check, ToolCommand, ToolContext } from './types.ts';
@@ -428,8 +428,7 @@ const retry = guard(async (args, ctx) => {
     chosen = candidates[0]!;
   }
   const label = config.workflows[chosen]!.triggers.find((t) => t.team === card.teamKey)!.label;
-  const drop = new Set<string>([LABELS.parked, LABELS.changes, LABELS.verified, LABELS.working]);
-  const next = card.labels.filter((n) => !drop.has(n) && !isRoundLabel(n));
+  const next = card.labels.filter((n) => !isStatusLabel(n));
   if (!next.includes(label)) next.push(label);
   await l.setLabels(card, next);
   const state = runnerState(ctx);
