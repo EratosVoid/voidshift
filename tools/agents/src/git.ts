@@ -119,7 +119,7 @@ export async function waitForPrHead(worktree: string, branch: string, sha: strin
 
 // CI for the pull request's current head. Checks take a moment to register
 // after a push, so "no checks" only counts once they have had time to show up.
-export async function waitForChecks(worktree: string, branch: string, timeoutMs = 30 * 60_000, settleMs = 2 * 60_000): Promise<{ verdict: 'SHIP' | 'FIX' | 'SKIP'; report: string }> {
+export async function waitForChecks(worktree: string, branch: string, timeoutMs = 30 * 60_000, settleMs = 2 * 60_000): Promise<{ verdict: 'SHIP' | 'FIX' | 'SKIP' | 'PENDING'; report: string }> {
   const settled = Date.now() + settleMs;
   const noChecks = () => {
     const out = sh('gh', ['pr', 'checks', branch], worktree);
@@ -138,7 +138,7 @@ export async function waitForChecks(worktree: string, branch: string, timeoutMs 
       if (/no checks reported/i.test(text)) return resolve({ verdict: 'SKIP', report: 'No CI checks on this repo.' });
       const summary = summarizeChecks(sh('gh', ['pr', 'checks', branch], worktree).stdout);
       if (!summary.failed.length && !summary.pending.length) return resolve({ verdict: 'SHIP', report: `CI passed (${summary.passed} checks).` });
-      if (!summary.failed.length) return resolve({ verdict: 'FIX', report: `CI did not finish in time. Still running: ${summary.pending.join(', ')}.` });
+      if (!summary.failed.length) return resolve({ verdict: 'PENDING', report: `CI did not finish in time. Still running: ${summary.pending.join(', ')}.` });
       resolve({ verdict: 'FIX', report: ciReport(summary) });
     });
   });

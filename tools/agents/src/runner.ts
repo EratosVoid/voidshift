@@ -188,7 +188,14 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
           if (!(await waitForPrHead(worktree, card.branchName, sha))) {
             throw new Park(`GitHub never showed commit ${sha.slice(0, 9)} on the pull request, so its CI could not be read. PR: ${prUrl}`);
           }
-          const ci = await waitForChecks(worktree, card.branchName);
+          // A slow CI is not a failed one: wait a second window, then park
+          // rather than send Dev a round it can only answer with no commit.
+          let ci = await waitForChecks(worktree, card.branchName);
+          if (ci.verdict === 'PENDING') {
+            say('CI still running, waiting another window');
+            ci = await waitForChecks(worktree, card.branchName);
+          }
+          if (ci.verdict === 'PENDING') throw new Park(`${ci.report} PR: ${prUrl}`);
           if (ci.verdict === 'FIX') {
             end(rec, 'FIX', ci.report);
             return { step: label, verdict: 'FIX', report: ci.report };
