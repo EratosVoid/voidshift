@@ -1,6 +1,6 @@
 {
   "name": "@voidlabs.gg/voidshift",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "description": "One CLI for the Void dev tools: keep your Mac awake, run agents in the background, shared skills and memory for Claude Code and Codex.",
   "license": "Apache-2.0",
   "repository": {
