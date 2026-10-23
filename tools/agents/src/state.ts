@@ -3,8 +3,9 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync
 import { join } from 'node:path';
 import { agentsDir, type Trigger } from './config.ts';
 
-// What the runner is doing right now, kept in runner.lock so status, cancel
-// and stop can see it. Older runners wrote only the pid.
+// What a runner process is doing right now, so status, cancel and stop can
+// see it. The dispatcher keeps one in runner.lock (older runners wrote only the
+// pid there); each card run keeps one in locks/<workspace>.json.
 export interface Current {
   pid: number;
   card?: string;
@@ -18,12 +19,13 @@ export interface Current {
   runDir?: string;
   // Where the card lives; Linear when unset. Cancel writes back there.
   source?: Trigger['source'];
+  // The workspace whose queue the run holds; set on workspace locks only.
+  workspace?: string;
 }
 
 export const lockPath = (configDir: string) => join(agentsDir(configDir), 'runner.lock');
 
-export function readCurrent(configDir: string): Current | null {
-  const path = lockPath(configDir);
+function readLock(path: string): Current | null {
   if (!existsSync(path)) return null;
   const text = readFileSync(path, 'utf8').trim();
   try {
@@ -33,6 +35,8 @@ export function readCurrent(configDir: string): Current | null {
     return null;
   }
 }
+
+export const readCurrent = (configDir: string): Current | null => readLock(lockPath(configDir));
 
 export function writeCurrent(configDir: string, current: Current): void {
   mkdirSync(agentsDir(configDir), { recursive: true });
@@ -65,11 +69,68 @@ export function bootTime(): Date | null {
   return sec ? new Date(Number(sec) * 1000) : null;
 }
 
-// The live run, or null when nothing runs or the lock is stale.
+// The live dispatcher, or null when none runs or the lock is stale.
 export function liveCurrent(configDir: string): Current | null {
   const c = readCurrent(configDir);
   return c && ours(c.pid) ? c : null;
 }
+
+// Whether a lock belongs to a live runner other than this process. A lock from
+// before the last boot cannot be a live run, whatever its pid is now.
+export function heldByOther(c: Current): boolean {
+  const booted = bootTime();
+  const fromBeforeBoot = !!(c.startedAt && booted && new Date(c.startedAt) < booted);
+  return c.pid !== process.pid && !fromBeforeBoot && ours(c.pid);
+}
+
+// One lock per workspace: the run holding its queue.
+const locksDir = (configDir: string) => join(agentsDir(configDir), 'locks');
+export const workspaceLockPath = (configDir: string, workspace: string) => join(locksDir(configDir), `${encodeURIComponent(workspace)}.json`);
+
+// Takes a workspace's queue for this process. Returns null once taken, or the
+// live run that holds it. A stale lock is removed and the take tried again.
+// The file is created exclusively, so two runners never both take it.
+export function acquireWorkspace(configDir: string, workspace: string, current: Omit<Current, 'workspace'>): Current | null {
+  mkdirSync(locksDir(configDir), { recursive: true });
+  const path = workspaceLockPath(configDir, workspace);
+  for (let attempt = 0; ; attempt++) {
+    try {
+      writeFileSync(path, JSON.stringify({ ...current, workspace }) + '\n', { flag: 'wx' });
+      return null;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+    }
+    const held = readLock(path);
+    if (held && heldByOther(held)) return held;
+    if (attempt) return held ?? { pid: 0, workspace };
+    rmSync(path, { force: true });
+  }
+}
+
+// Updates the lock of a queue this process holds.
+export function writeWorkspace(configDir: string, workspace: string, current: Omit<Current, 'workspace'>): void {
+  mkdirSync(locksDir(configDir), { recursive: true });
+  writeFileSync(workspaceLockPath(configDir, workspace), JSON.stringify({ ...current, workspace }) + '\n');
+}
+
+export const releaseWorkspace = (configDir: string, workspace: string) => rmSync(workspaceLockPath(configDir, workspace), { force: true });
+
+// Every workspace lock on disk, stale ones included.
+export function workspaceLocks(configDir: string): Current[] {
+  let names: string[];
+  try {
+    names = readdirSync(locksDir(configDir)).filter((n) => n.endsWith('.json')).sort();
+  } catch {
+    return [];
+  }
+  return names.map((n) => readLock(join(locksDir(configDir), n))).filter((c): c is Current => !!c);
+}
+
+// The card runs going on now, one per busy workspace.
+export const liveRuns = (configDir: string): Current[] => workspaceLocks(configDir).filter((c) => ours(c.pid));
+
+// Releases the lock a run left behind, wherever it lives.
+export const clearLock = (configDir: string, c: Current) => (c.workspace ? releaseWorkspace(configDir, c.workspace) : clearCurrent(configDir));
 
 // Paused: the runner stays loaded but picks up no new cards.
 const pausePath = (configDir: string) => join(agentsDir(configDir), 'paused');
@@ -139,6 +200,8 @@ export interface RunRecord {
   outcome: Outcome;
   reason?: string;
   prUrl?: string;
+  // The workspace whose queue the run took.
+  workspace?: string;
   startedAt: string;
   endedAt?: string;
 }

@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { configDir } from '../../config.ts';
 import { runAction } from '../actions.ts';
 import { useBackGuard, useEquivalent, useHints, useKeys, useScreen, type ActionSpec, type Hint } from '../context.ts';
-import { useData, type DataState, type RunItem, type StepRecord } from '../data.ts';
+import { liveRunsOf, useData, type AgentsCurrent, type DataState, type RunItem, type StepRecord } from '../data.ts';
 import { duration, folderStamp, stamp, tilde, truncate } from '../format.ts';
 import { Lines, Panel, Select, Table, TextInput, outcomeColour, seg, type Cell, type Line } from '../widgets.ts';
 import type { Screen } from '../screens.ts';
@@ -53,20 +53,22 @@ export function runMs(run: RunItem, nowMs: number): number | null {
   return Math.max(0, end - start);
 }
 
-// The outcome shown for a run. A run that says "running" while the runner is
-// busy with something else was cut off.
+// The outcome shown for a run. A run that says "running" while no live run
+// is on its card was cut off.
 export function outcomeOf(run: RunItem, state: Pick<DataState, 'agents'>): string {
   const outcome = run.record?.outcome;
   if (!outcome) return 'old run';
-  if (outcome === 'running' && state.agents && state.agents.current?.card !== run.card) return 'interrupted';
+  if (outcome === 'running' && state.agents && !liveRunsOf(state.agents).some((c) => c.card === run.card)) return 'interrupted';
   return outcome;
 }
 
-export function isLive(run: RunItem | undefined, state: Pick<DataState, 'agents'>): boolean {
-  if (!run || run.record?.outcome !== 'running') return false;
-  const cur = state.agents?.current;
-  return !!cur && cur.card === run.card && (!cur.runDir || cur.runDir === run.dir);
+// The live run working on this run, if any.
+export function liveRunFor(run: RunItem | undefined, state: Pick<DataState, 'agents'>): AgentsCurrent | undefined {
+  if (!run || run.record?.outcome !== 'running') return undefined;
+  return liveRunsOf(state.agents).find((cur) => cur.card === run.card && (!cur.runDir || cur.runDir === run.dir));
 }
+
+export const isLive = (run: RunItem | undefined, state: Pick<DataState, 'agents'>): boolean => !!liveRunFor(run, state);
 
 export function startedText(run: RunItem): string {
   const t = run.record ? Date.parse(run.record.startedAt) : NaN;
@@ -246,7 +248,7 @@ export function Runs(props: { params: Record<string, unknown> }): React.ReactEle
   const isLatest = !!run && state.runs.find((r) => r.card === run.card)?.dir === run.dir;
   const labels = useLabels(isLatest && record ? run!.card : undefined);
   const live = isLive(run, state);
-  const liveStep = state.agents?.current?.step;
+  const liveStep = liveRunFor(run, state)?.step;
 
   const workflow = state.workflows.find((w) => w.name === record?.workflow);
   const stepIds = workflow?.steps ?? [...new Set((record?.steps ?? []).map((s) => s.step))];

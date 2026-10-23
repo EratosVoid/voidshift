@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { cancelCurrent, countRounds, isInterrupted, formatRunLine, parseAge, parsePlistArgs, scanRunnerErrors, trackerWarnings, workingLine } from '../src/control.ts';
+import { cancelCurrent, countRounds, isInterrupted, formatRunLine, parseAge, parsePlistArgs, pickCancel, scanRunnerErrors, trackerWarnings, workingLine, workspaceLines } from '../src/control.ts';
 import type { Tracker, Trackers } from '../src/tracker.ts';
-import { lockPath, writeCurrent, type RunEntry } from '../src/state.ts';
+import { lockPath, workspaceLockPath, writeCurrent, writeWorkspace, type RunEntry } from '../src/state.ts';
 import type { ToolContext } from '../src/types.ts';
 
 test('parseAge reads days and hours', () => {
@@ -44,8 +44,9 @@ test('countRounds counts rounds that had a FIX', () => {
 
 test('isInterrupted flags running records that are not live', () => {
   const e: RunEntry = { card: 'ENG-12', stamp: 'x', dir: '/x', record: record({ outcome: 'running' }), logs: [] };
-  assert.equal(isInterrupted(e, null), true);
-  assert.equal(isInterrupted(e, { pid: 1, card: 'ENG-12', runDir: '/x' }), false);
+  assert.equal(isInterrupted(e, []), true);
+  assert.equal(isInterrupted(e, [{ pid: 1, card: 'ENG-12', runDir: '/x' }]), false);
+  assert.equal(isInterrupted(e, [{ pid: 1, card: 'ENG-3', runDir: '/y', workspace: 'a' }, { pid: 2, card: 'ENG-12', runDir: '/x', workspace: 'b' }]), false, 'a second live run');
   assert.match(formatRunLine(e), /interrupted/);
 });
 
@@ -72,6 +73,31 @@ test('a stale lock is cleared without any signal and the run is marked cancelled
   assert.throws(() => readFileSync(lockPath(configDir)));
 });
 
+test('a stale workspace lock is cleared from the locks folder', async () => {
+  const configDir = mkdtempSync(join(tmpdir(), 'vsf-ctl-'));
+  writeWorkspace(configDir, 'solvia', { pid: 999999 });
+  const ctx = { configDir, log: () => {} } as unknown as ToolContext;
+  const deps = { ours: () => false, kill: () => {}, sleep: async () => {}, cancelCard: async () => true };
+  await cancelCurrent(ctx, { pid: 999999, workspace: 'solvia' }, deps);
+  assert.throws(() => readFileSync(workspaceLockPath(configDir, 'solvia')));
+});
+
+test('cancel without a card refuses when more than one run is live', () => {
+  const a = { pid: 1, card: 'DS06-1', workspace: 'solvia' };
+  const b = { pid: 2, card: 'ORG-9', workspace: 'devvoid' };
+  assert.equal(pickCancel([a, b], null), 'More than one card is running: DS06-1 in solvia, ORG-9 in devvoid. Name one: vsf agents cancel CARD.');
+  assert.equal(pickCancel([a, b], null, 'ORG-9'), b);
+  assert.equal(pickCancel([a], null), a);
+  assert.deepEqual(pickCancel([], { pid: 3 }), { pid: 3 }, 'a check in progress');
+  assert.equal(pickCancel([], null), 'Nothing is running.');
+  assert.equal(pickCancel([a], null, 'ENG-1'), 'ENG-1 is not running. Running: DS06-1 in solvia.');
+});
+
+test('status prints a line per workspace', () => {
+  const running = [{ pid: 1, card: 'DS06-1', workflow: 'build', step: 'Dev', round: 1, workspace: 'solvia', elapsedMinutes: 4 }];
+  assert.deepEqual(workspaceLines(['solvia', 'devvoid'], running), ['  solvia: Working on DS06-1 (build, Dev, round 1, 4m).', '  devvoid: idle.']);
+});
+
 test('a live runner gets SIGTERM, then SIGKILL, and no card cleanup from us', async () => {
   const ctx = { configDir: mkdtempSync(join(tmpdir(), 'vsf-ctl-')), log: () => {} } as unknown as ToolContext;
   const signals: string[] = [];
@@ -95,7 +121,7 @@ test('formatRunLine shows a finished run', () => {
 test('formatRunLine shows elapsed time for a running run and skips zero rounds', () => {
   const r = record({ outcome: 'running', endedAt: undefined, steps: [] });
   const e: RunEntry = { card: 'ENG-12', stamp: 'x', dir: '/x', record: r, logs: [] };
-  assert.match(formatRunLine(e, Date.parse('2026-10-20T11:05:00.000Z'), { pid: 1, card: 'ENG-12', runDir: '/x' }), /running  1h 5m$/);
+  assert.match(formatRunLine(e, Date.parse('2026-10-20T11:05:00.000Z'), [{ pid: 1, card: 'ENG-12', runDir: '/x' }]), /running  1h 5m$/);
 });
 
 test('formatRunLine handles runs without a record', () => {

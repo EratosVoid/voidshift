@@ -268,6 +268,21 @@ test('a custom one step prompt runs from cron with its own model, timeout and wr
   assert.equal(rig.calls().length, 1);
 });
 
+test('the workspace context reaches the step prompt', async () => {
+  const rig = agentRig('echo done\n');
+  const workflow: Workflow = { triggers: [cron], steps: [{ id: 'brief', prompt: 'brief.md', output: 'none' }], maxRounds: 1, project: 'p' };
+  const { rc, logs } = rcWith({ w: workflow }, {});
+  rc.selfCommand = [];
+  const root = mkdtempSync(join(tmpdir(), 'vsf-ws-'));
+  writeFileSync(join(root, 'CONTEXT.md'), 'Solvia clients ship to staging.\n');
+  rc.config.workspaces = { solvia: { root } };
+  rc.config.projects.p = { path: rig.repo, base: 'main', workspace: 'solvia' };
+  rc.config.folders = { w: rig.defs };
+  const outcome = await withPath(rig.bin, () => runCard(cronCard('w', 'Brief me', new Date()), cron, 'w', workflow, rc.config.projects.p!, rc));
+  assert.equal(outcome, 'verified', logs.join('\n'));
+  assert.match(rig.calls()[0]!.stdin, /# Workspace\n\nSolvia clients ship to staging\./);
+});
+
 test('a custom step that fails parks the run', async () => {
   const rig = agentRig('exit 3\n');
   const { outcome, logs } = await runCron(rig, { triggers: [cron], steps: [{ id: 'brief', prompt: 'brief.md', output: 'none' }], maxRounds: 1, project: 'p' });

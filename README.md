@@ -74,9 +74,9 @@ or `vs-parked`) and the round (`vs-v1`, `vs-v2`). On Linear it posts the plan an
 one final comment, nothing in between.
 
 ```sh
-vsf agents status                  # runner, the card in progress, parked cards
+vsf agents status                  # runner, the card each workspace is on, parked cards
 vsf agents run ENG-123 [--from qa] # run one card now, in this terminal
-vsf agents start | stop | restart  # the background runner (stop cancels the card)
+vsf agents start | stop | restart  # the background runner (stop cancels its cards)
 vsf agents pause | resume          # pick up no new cards for a while
 vsf agents cancel | retry ENG-123  # stop a card, or queue a parked one again
 vsf agents runs | show ENG-123     # what happened, step by step
@@ -84,10 +84,24 @@ vsf agents logs [ENG-123] [-f]     # the runner log, or a card's step logs
 vsf agents workflows               # workflows in the order they match
 vsf agents workflow add|edit|show|rename|move|rm
 vsf agents projects | project add|edit|show|rename|rm
+vsf agents workspace add|list|rm   # folders of repos, each with its own queue
 vsf agents homes | link DIR        # where the agents are installed
 vsf agents clean                   # old worktrees and run logs
 vsf agents validate [DIR]          # check the config and agent folders
 ```
+
+Each workspace has one queue: cards in different workspaces run side by side,
+two cards in one workspace one after the other. Projects are in the `default`
+workspace until you move them:
+
+```sh
+vsf agents workspace add solvia --root ~/work/solvia   # steps carry ~/work/solvia/CONTEXT.md
+vsf agents project edit erp --workspace solvia --match DS06
+```
+
+`--match` names a tracker project (or its first word, so `DS06` matches "DS06
+Atleurope ERP"). A card of that project runs in the matching project, in any
+workspace, before the workflow's own project is considered.
 
 A workflow can also be a folder you write by hand,
 `~/.config/voidshift/agents/defs/NAME/agent.json`, with its prompt files next to

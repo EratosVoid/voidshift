@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
-import { AGENTS, AGENT_FILE, OUTPUTS, STEP_ID, isBuiltin, readAgentFolder, stepFile, type AgentsConfig, type Step, type StepDef, type StepId, type Trigger, type Workflow, describeTrigger, triggerSpec } from './config.ts';
+import { AGENTS, AGENT_FILE, DEFAULT_WORKSPACE, OUTPUTS, STEP_ID, WORKSPACE_NAME, isBuiltin, readAgentFolder, stepFile, type AgentsConfig, type Step, type StepDef, type StepId, type Trigger, type Workflow, describeTrigger, triggerSpec } from './config.ts';
 import { parseCron } from './cron.ts';
 
 const isInt = (v: unknown, min: number, max: number) => typeof v === 'number' && Number.isInteger(v) && v >= min && v <= max;
@@ -161,10 +161,35 @@ export const workflowsUsing = (config: Pick<AgentsConfig, 'workflows'>, project:
 
 const isObj = (v: unknown): v is Record<string, any> => !!v && typeof v === 'object' && !Array.isArray(v);
 
+// What is wrong with the projects' workspaces and matches: a workspace that
+// does not exist, or a tracker project name two projects both claim.
+export function projectProblems(projects: AgentsConfig['projects'], workspaces: AgentsConfig['workspaces']): string[] {
+  const problems: string[] = [];
+  const claimed = new Map<string, string>();
+  for (const [name, p] of Object.entries(projects)) {
+    if (!isObj(p)) continue;
+    if (p.workspace !== undefined && (typeof p.workspace !== 'string' || (p.workspace !== DEFAULT_WORKSPACE && !Object.hasOwn(workspaces, p.workspace)))) {
+      problems.push(`Project ${name}: workspace ${String(p.workspace)} does not exist. vsf agents workspace add creates it.`);
+    }
+    if (p.match === undefined) continue;
+    if (!Array.isArray(p.match) || p.match.some((m) => typeof m !== 'string' || !m.trim())) {
+      problems.push(`Project ${name}: match must list tracker project names.`);
+      continue;
+    }
+    for (const m of p.match) {
+      const key = m.trim().toLowerCase();
+      const other = claimed.get(key);
+      if (other && other !== name) problems.push(`Projects ${other} and ${name} both match ${m}.`);
+      else claimed.set(key, name);
+    }
+  }
+  return problems;
+}
+
 // Everything wrong with a whole agents config, e.g. one edited by hand.
 // `saved` is the config on disk: only what the write changes is checked, so a
 // moved folder or a retired agent elsewhere does not block an unrelated edit.
-export function validateConfig(value: unknown, saved?: Pick<AgentsConfig, 'projects' | 'workflows'>): string[] {
+export function validateConfig(value: unknown, saved?: Pick<AgentsConfig, 'projects' | 'workflows'> & Partial<Pick<AgentsConfig, 'workspaces'>>): string[] {
   if (!isObj(value)) return ['The config must be an object.'];
   const problems: string[] = [];
   if (value.engine !== 'claude' && value.engine !== 'codex') problems.push('engine must be claude or codex.');
@@ -177,6 +202,18 @@ export function validateConfig(value: unknown, saved?: Pick<AgentsConfig, 'proje
     if (!isObj(p) || typeof p.path !== 'string' || !p.path) problems.push(`Project ${name} needs a path.`);
     else if (saved?.projects?.[name]?.path !== p.path && !existsSync(join(p.path, '.git'))) problems.push(`Project ${name}: ${p.path} is not a git repository.`);
   }
+  // Older configs have no workspaces: every project is in the default one.
+  const workspaces = value.workspaces === undefined ? {} : isObj(value.workspaces) ? value.workspaces : null;
+  if (!workspaces) problems.push('workspaces must be an object.');
+  for (const [name, w] of Object.entries(workspaces ?? {})) {
+    if (!WORKSPACE_NAME.test(name)) problems.push(`Workspace ${name} must be letters, digits, dashes and underscores.`);
+    if (!isObj(w) || typeof w.root !== 'string' || !w.root) problems.push(`Workspace ${name} needs a root folder.`);
+    else {
+      if (saved?.workspaces?.[name]?.root !== w.root && !existsSync(w.root)) problems.push(`Workspace ${name}: ${w.root} does not exist.`);
+      if (w.context !== undefined && typeof w.context !== 'string') problems.push(`Workspace ${name} context must be a file name.`);
+    }
+  }
+  problems.push(...projectProblems((projects ?? {}) as AgentsConfig['projects'], (workspaces ?? {}) as AgentsConfig['workspaces']));
   if (!Array.isArray(value.enabled) || value.enabled.some((a) => typeof a !== 'string' || !(a in AGENTS))) problems.push(`enabled must list agents from: ${Object.keys(AGENTS).join(', ')}.`);
   if (value.commits !== undefined && (!isObj(value.commits) || Object.entries(value.commits).some(([k, v]) => !['signOff', 'dropAiTrailers'].includes(k) || typeof v !== 'boolean'))) problems.push('commits may only set signOff and dropAiTrailers, each true or false.');
   if (!Array.isArray(value.homes) || value.homes.some((h) => !isObj(h) || (h.kind !== 'claude' && h.kind !== 'codex') || typeof h.dir !== 'string')) problems.push('homes must be a list of { kind: claude or codex, dir }.');

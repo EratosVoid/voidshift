@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import {
@@ -17,7 +18,7 @@ import {
   verdictBlock,
   type StepResult,
 } from './workflow.ts';
-import { agentsDir, hasWork, isCardTrigger, resolveStep, stepId, stepIdLabel, type AgentsConfig, type ResolvedStep, type Workflow, type Project, type Trigger } from './config.ts';
+import { agentsDir, hasWork, isCardTrigger, resolveProject, resolveStep, stepId, stepIdLabel, workspaceContext, workspaceOf, type AgentsConfig, type ResolvedStep, type Workflow, type Project, type Trigger } from './config.ts';
 import { lastDue, parseCron } from './cron.ts';
 import { runAgent, stopAgents } from './engine.ts';
 import { commitsAhead, enforceCommitPolicy, defaultBranch, ensureDraftPr, ensureWorktree, headSha, markReady, push, resetWorktree, waitForChecks, waitForPrHead } from './git.ts';
@@ -25,7 +26,7 @@ import type { Card } from './linear.ts';
 import { noTracker, type Tracker, type Trackers } from './tracker.ts';
 import { recall, syncMemory, vaultPath } from './memory.ts';
 import { claudeSettingsFile, readRules, rulesSection } from './profile.ts';
-import { bootTime, clearCurrent, isPaused, ours, readCurrent, readPending, writeCurrent, writePending, writeRun, readCronState, writeCronState, type Pending, type RunRecord, type StepRecord } from './state.ts';
+import { acquireWorkspace, clearCurrent, heldByOther, isPaused, liveRuns, readCurrent, readPending, releaseWorkspace, writeCurrent, writePending, writeRun, writeWorkspace, readCronState, writeCronState, type Pending, type RunRecord, type StepRecord } from './state.ts';
 
 const stamp = () => new Date().toISOString().replace(/[:.]/g, '-');
 
@@ -90,13 +91,14 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
   const writeBack = isCardTrigger(trigger) ? (workflow.writeBack ?? {}) : {};
   const labelsOn = writeBack.labels !== false;
   const startedAt = new Date().toISOString();
-  const record: RunRecord = { card: card.identifier, title: card.title, url: card.url || undefined, workflow: workflowName, trigger: label || (trigger.source === 'cron' ? trigger.schedule : ''), source: trigger.source, steps: [], outcome: 'running', startedAt };
+  const workspace = workspaceOf(project);
+  const record: RunRecord = { card: card.identifier, title: card.title, url: card.url || undefined, workflow: workflowName, trigger: label || (trigger.source === 'cron' ? trigger.schedule : ''), source: trigger.source, steps: [], outcome: 'running', workspace, startedAt };
   active = { record, runDir };
   const save = () => writeRun(runDir, record);
   save();
   let loops = 0;
-  // The lock tells status and cancel what is running.
-  const mark = (step: string) => writeCurrent(rc.configDir, { pid: process.pid, card: card.identifier, title: card.title, workflow: workflowName, step, round: loops, startedAt, runDir, source: trigger.source });
+  // The workspace lock tells status and cancel what is running.
+  const mark = (step: string) => writeWorkspace(rc.configDir, workspace, { pid: process.pid, card: card.identifier, title: card.title, workflow: workflowName, step, round: loops, startedAt, runDir, source: trigger.source });
   // Written before the first tracker call, so a cancel always knows the card.
   mark('Starting');
   const begin = (def: ResolvedStep): StepRecord => {
@@ -186,7 +188,8 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
     // Latest notes from every machine before recall reads them.
     const pulled = syncMemory(rc.selfCommand, rc.configDir);
     if (pulled) say(pulled);
-    const known = [recall(rc.selfCommand, rc.configDir, `${workflow.project} ${card.title}\n${card.description ?? ''}`), vault ? memoryNote(vault) : '', rules].filter(Boolean).join('\n\n');
+    const context = workspaceContext(config, workspace);
+    const known = [recall(rc.selfCommand, rc.configDir, `${workflow.project} ${card.title}\n${card.description ?? ''}`), context ? `# Workspace\n\n${context}` : '', vault ? memoryNote(vault) : '', rules].filter(Boolean).join('\n\n');
     const worktree = join(agentsDir(rc.configDir), 'worktrees', card.identifier);
     ensureWorktree(project.path, worktree, card.branchName, base);
     say(`working in ${worktree} on ${card.branchName}`);
@@ -363,9 +366,12 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
   }
 }
 
-type Job = { card: Card; trigger: Trigger; workflow: string };
+type Job = { card: Card; trigger: Trigger; workflow: string; workspace: string };
 
-// A scheduled run's stand-in for a card: the task, on a branch of its own.
+// The workspace whose queue a job waits in. A workflow whose project is
+// missing still queues somewhere, so its run can say what is wrong.
+const jobWorkspace = (config: AgentsConfig, workflow: Workflow, card: Card) => workspaceOf(resolveProject(config, workflow, card)?.project);
+
 export function cronCard(workflow: string, task: string, at: Date): Card {
   const stamp = at.toISOString().slice(0, 16).replace(/[-:T]/g, '');
   const slug = workflow.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'cron';
@@ -384,49 +390,85 @@ export function cronCard(workflow: string, task: string, at: Date): Card {
 
 const cronKey = (workflow: string, schedule: string) => `${workflow} ${schedule}`;
 
-// The first job waiting on any workflow's triggers, in workflow order: a card
-// carrying a trigger label, or a schedule that came due since it last fired.
-// A schedule seen for the first time starts counting from now. With a card,
-// only that card is considered; with a workflow name, only that workflow, and
-// `force` fires its schedule now.
-export async function nextJob(rc: RunContext, only?: string, workflowName?: string, opts: { force?: boolean; now?: Date } = {}): Promise<Job | null> {
-  const now = opts.now ?? new Date();
-  const workflows = Object.entries(rc.config.workflows).filter(([name]) => !workflowName || name === workflowName);
+export interface JobQuery {
+  // Only this card, matched by team whatever its labels.
+  only?: string;
+  // Only this workflow; `force` fires its schedule now.
+  workflow?: string;
+  // Only this schedule of the workflow.
+  schedule?: string;
+  force?: boolean;
+  // Workspaces whose queue is taken: their jobs wait.
+  busy?: Set<string>;
+  // Cards to leave for later.
+  skip?: Set<string>;
+  // How many jobs to return, at most one per workspace.
+  limit?: number;
+  now?: Date;
+}
+
+// Jobs waiting on the workflows' triggers, in workflow order, at most one per
+// workspace and none in a busy one: a card carrying a trigger label, or a
+// schedule that came due since it last fired. A schedule seen for the first
+// time starts counting from now, and one whose workspace is busy keeps waiting
+// without being marked as fired.
+export async function findJobs(rc: RunContext, q: JobQuery = {}): Promise<Job[]> {
+  const now = q.now ?? new Date();
+  const limit = q.limit ?? Infinity;
+  const taken = new Set(q.busy ?? []);
+  const out: Job[] = [];
+  const workflows = Object.entries(rc.config.workflows).filter(([name]) => !q.workflow || name === q.workflow);
   let pinned: { card: Card; source: string } | null = null;
-  if (only) {
-    const team = only.split('-')[0]!.toUpperCase();
+  if (q.only) {
+    const team = q.only.split('-')[0]!.toUpperCase();
     const sources = [...new Set(workflows.flatMap(([, w]) => w.triggers.filter(isCardTrigger).filter((t) => t.team === team).map((t) => t.source)))];
     for (const source of sources) {
       try {
-        pinned = { card: await rc.trackers(source).card(only), source };
+        pinned = { card: await rc.trackers(source).card(q.only), source };
         break;
       } catch (err) {
         if (source === sources.at(-1)) throw err;
       }
     }
-    if (!pinned) return null;
+    if (!pinned) return [];
   }
   const cron = readCronState(rc.configDir);
   let cronChanged = false;
+  const take = (job: Omit<Job, 'workspace'>, workspace: string) => {
+    taken.add(workspace);
+    out.push({ ...job, workspace });
+    return out.length >= limit;
+  };
   try {
     for (const [name, workflow] of workflows) {
       for (const trigger of workflow.triggers) {
         if (!isCardTrigger(trigger)) {
-          const schedule = only ? null : parseCron(trigger.schedule);
+          const schedule = q.only || (q.schedule && q.schedule !== trigger.schedule) ? null : parseCron(trigger.schedule);
           if (!schedule) continue;
           const key = cronKey(name, trigger.schedule);
           const last = cron[key];
-          const due = opts.force ? now : last ? lastDue(schedule, new Date(last), now) : null;
-          if (!last || due) {
+          if (!last) {
             cron[key] = now.toISOString();
             cronChanged = true;
           }
-          if (due) return { card: cronCard(name, trigger.task, due), trigger, workflow: name };
+          const due = q.force ? now : last ? lastDue(schedule, new Date(last), now) : null;
+          if (!due) continue;
+          const card = cronCard(name, trigger.task, due);
+          const workspace = jobWorkspace(rc.config, workflow, card);
+          if (taken.has(workspace)) continue;
+          cron[key] = now.toISOString();
+          cronChanged = true;
+          if (take({ card, trigger, workflow: name }, workspace)) return out;
           continue;
         }
+        // A run for one schedule takes no labelled cards.
+        if (q.schedule) continue;
         // A pinned card may have lost its label (a parked card re-run by hand), so match by team.
         if (pinned) {
-          if (pinned.source === trigger.source && pinned.card.teamKey === trigger.team) return { card: pinned.card, trigger, workflow: name };
+          if (pinned.source === trigger.source && pinned.card.teamKey === trigger.team) {
+            take({ card: pinned.card, trigger, workflow: name }, jobWorkspace(rc.config, workflow, pinned.card));
+            return out;
+          }
           continue;
         }
         let cards: Card[];
@@ -437,14 +479,27 @@ export async function nextJob(rc: RunContext, only?: string, workflowName?: stri
           rc.log(`Could not check ${trigger.source === 'voidtrack' ? 'VoidTrack' : 'Linear'} for ${trigger.team} + ${trigger.label} (${(err as Error).message}). Trying again next minute.`);
           continue;
         }
-        const card = cards.find((c) => c.teamKey === trigger.team && c.labels.includes(trigger.label));
-        if (card) return { card, trigger, workflow: name };
+        for (const card of cards) {
+          if (card.teamKey !== trigger.team || !card.labels.includes(trigger.label)) continue;
+          // A card already taken this pass, by an earlier trigger, is not run twice.
+          if (q.skip?.has(card.identifier) || out.some((j) => j.card.identifier === card.identifier)) continue;
+          const workspace = jobWorkspace(rc.config, workflow, card);
+          if (taken.has(workspace)) continue;
+          if (take({ card, trigger, workflow: name }, workspace)) return out;
+        }
       }
     }
-    return null;
+    return out;
   } finally {
     if (cronChanged) writeCronState(rc.configDir, cron);
   }
+}
+
+// The first job waiting, as findJobs finds it. With a card, only that card is
+// considered; with a workflow name, only that workflow, and `force` fires its
+// schedule now.
+export async function nextJob(rc: RunContext, only?: string, workflowName?: string, opts: Omit<JobQuery, 'only' | 'workflow' | 'limit'> = {}): Promise<Job | null> {
+  return (await findJobs(rc, { ...opts, only, workflow: workflowName, limit: 1 }))[0] ?? null;
 }
 
 // Retries tracker writes that failed while parking. Never throws.
@@ -495,20 +550,19 @@ function queueCancel(configDir: string, cardId: string, comment: string, source:
   }
 }
 
-// One pass for the background runner. A lock keeps two passes from working at once.
-export async function tick(rc: RunContext, only?: string, opts: { workflow?: string; from?: string } = {}): Promise<number> {
-  const held = readCurrent(rc.configDir);
-  const booted = bootTime();
-  // A lock from before the last boot cannot be a live run, whatever its pid is now.
-  const fromBeforeBoot = !!(held?.startedAt && booted && new Date(held.startedAt) < booted);
-  if (held && held.pid !== process.pid && !fromBeforeBoot && ours(held.pid)) {
-    if (only) rc.log(`The runner is busy with ${held.card ?? 'a check'}. Try again when it finishes.`);
-    return only ? 1 : 0;
-  }
-  writeCurrent(rc.configDir, { pid: process.pid, startedAt: new Date().toISOString() });
-  // A stop (Ctrl+C, launchd, shutdown) ends the agents, marks the run, and
-  // takes the working label off the card so it is never left stuck.
+// Runs one job in its workspace's queue: a pinned card, a workflow's schedule,
+// or the first job waiting in a free workspace. The workspace lock keeps two
+// runs from working in one workspace at once. `child` is a run the dispatcher
+// started, which leaves the pending writes to it.
+export async function tick(rc: RunContext, only?: string, opts: { workflow?: string; from?: string; schedule?: string; child?: boolean } = {}): Promise<number> {
+  let held: string | null = null;
+  // A stop (Ctrl+C, the dispatcher, launchd, shutdown) ends the agents, marks
+  // the run, and takes the working label off the card so it is never left stuck.
+  // The dispatcher and the service can both signal, so a second one is ignored.
+  let stopping = false;
   const onSignal = async () => {
+    if (stopping) return;
+    stopping = true;
     await stopAgents();
     const running = active && active.record.outcome === 'running' ? active : null;
     if (active) {
@@ -529,17 +583,18 @@ export async function tick(rc: RunContext, only?: string, opts: { workflow?: str
       // Did not finish in time: leave the work for the next tick.
       if (!finished) queueCancel(rc.configDir, card, `**Cancelled.** Add \`${trigger}\` again to restart.`, source);
     }
-    clearCurrent(rc.configDir);
+    if (held) releaseWorkspace(rc.configDir, held);
     process.exit(143);
   };
-  process.once('SIGTERM', onSignal);
-  process.once('SIGINT', onSignal);
+  process.on('SIGTERM', onSignal);
+  process.on('SIGINT', onSignal);
   try {
-    await flushPending(rc);
+    if (!opts.child) await flushPending(rc);
     if (!only && isPaused(rc.configDir)) return 0;
-    let job: Awaited<ReturnType<typeof nextJob>>;
+    let job: Job | null;
     try {
-      job = await nextJob(rc, only, opts.workflow, { force: !!opts.workflow && !only });
+      const busy = only ? undefined : new Set(liveRuns(rc.configDir).filter((c) => c.pid !== process.pid).map((c) => workspaceOf(c)));
+      job = await nextJob(rc, only, opts.workflow, { force: !!opts.workflow && !only, schedule: opts.schedule, busy });
     } catch (err) {
       rc.log(`Could not read ${only} (${(err as Error).message}).`);
       return 1;
@@ -549,8 +604,8 @@ export async function tick(rc: RunContext, only?: string, opts: { workflow?: str
       return only ? 1 : 0;
     }
     const workflow = rc.config.workflows[job.workflow]!;
-    const project = rc.config.projects[workflow.project];
-    if (!project) {
+    const resolved = resolveProject(rc.config, workflow, job.card);
+    if (!resolved) {
       rc.log(`Workflow ${job.workflow} points at a missing project ${workflow.project}. Run vsf agents workflow edit to fix it.`);
       return 1;
     }
@@ -558,8 +613,115 @@ export async function tick(rc: RunContext, only?: string, opts: { workflow?: str
       rc.log(`Workflow ${job.workflow} has no ${stepIdLabel(opts.from)} step.`);
       return 2;
     }
-    const outcome = await runCard(job.card, job.trigger, job.workflow, workflow, project, rc, { from: opts.from });
+    const busy = acquireWorkspace(rc.configDir, job.workspace, { pid: process.pid, card: job.card.identifier, startedAt: new Date().toISOString() });
+    if (busy) {
+      rc.log(`Workspace ${job.workspace} is busy with ${busy.card ?? 'a check'}. Try again when it finishes.`);
+      return 1;
+    }
+    held = job.workspace;
+    const outcome = await runCard(job.card, job.trigger, job.workflow, workflow, resolved.project, rc, { from: opts.from });
     return outcome === 'verified' ? 0 : 1;
+  } catch (err) {
+    rc.log(`Error: ${(err as Error).message}`);
+    return 1;
+  } finally {
+    process.off('SIGTERM', onSignal);
+    process.off('SIGINT', onSignal);
+    if (held) releaseWorkspace(rc.configDir, held);
+  }
+}
+
+// A run the dispatcher started, as much of a child process as it needs.
+export interface ChildRun {
+  kill(signal: NodeJS.Signals): unknown;
+  once(event: 'exit' | 'error', listener: (err?: Error) => void): unknown;
+  exitCode: number | null;
+}
+
+export interface DispatchDeps {
+  // Starts `agents tick` with these arguments in a process of its own.
+  start: (args: string[]) => ChildRun;
+  // How long to wait for a run to finish before looking for work again.
+  waitMs: number;
+  // The config as it is now, read again on every pass.
+  reload?: () => AgentsConfig;
+}
+
+// The arguments that make a child tick run exactly this job.
+export const jobArgs = (job: Job): string[] =>
+  isCardTrigger(job.trigger) ? ['--card', job.card.identifier, '--workflow', job.workflow] : ['--workflow', job.workflow, '--schedule', job.trigger.schedule];
+
+const realDeps = (rc: RunContext): DispatchDeps => ({
+  start: (args) => {
+    const [bin, ...rest] = rc.selfCommand;
+    return spawn(bin!, [...rest, 'agents', 'tick', ...args], { stdio: 'inherit' });
+  },
+  waitMs: 60_000,
+});
+
+// The background runner. The service starts a new pass only once the last one
+// ended, so this pass stays up while cards run: it starts one child process
+// per workspace with work waiting, looks again whenever one ends or a minute
+// passes, and returns once nothing runs and nothing waits. runner.lock keeps
+// two dispatchers from working at once.
+export async function dispatch(rc: RunContext, over: Partial<DispatchDeps> = {}): Promise<number> {
+  const deps = { ...realDeps(rc), ...over };
+  const held = readCurrent(rc.configDir);
+  if (held && heldByOther(held)) return 0;
+  writeCurrent(rc.configDir, { pid: process.pid, startedAt: new Date().toISOString() });
+  const children = new Map<string, ChildRun>();
+  // When each card was started, so one whose run failed before it took the
+  // trigger label off waits for the next pass instead of starting again at once.
+  const started = new Map<string, number>();
+  // Ends the wait early when a child exits.
+  let wake = () => {};
+  // A stop ends every run: each child cancels its own card.
+  let stopping = false;
+  const onSignal = async () => {
+    if (stopping) return;
+    stopping = true;
+    const exits = [...children.values()].filter((c) => c.exitCode === null).map((c) => new Promise<void>((resolve) => c.once('exit', () => resolve())));
+    for (const c of children.values()) c.kill('SIGTERM');
+    await Promise.race([Promise.all(exits), new Promise((resolve) => setTimeout(resolve, 10_000).unref())]);
+    clearCurrent(rc.configDir);
+    process.exit(143);
+  };
+  process.on('SIGTERM', onSignal);
+  process.on('SIGINT', onSignal);
+  try {
+    for (;;) {
+      if (deps.reload) rc = { ...rc, config: deps.reload() };
+      await flushPending(rc);
+      if (!isPaused(rc.configDir)) {
+        const busy = new Set([...children.keys(), ...liveRuns(rc.configDir).map((c) => workspaceOf(c))]);
+        const skip = new Set([...started].filter(([, at]) => Date.now() - at < deps.waitMs).map(([id]) => id));
+        for (const job of await findJobs(rc, { busy, skip })) {
+          started.set(job.card.identifier, Date.now());
+          rc.log(`${job.card.identifier} starts ${job.workflow} in workspace ${job.workspace}.`);
+          const child = deps.start(jobArgs(job));
+          children.set(job.workspace, child);
+          const ended = () => {
+            if (children.get(job.workspace) === child) children.delete(job.workspace);
+            wake();
+          };
+          child.once('exit', ended);
+          // A program that could not start never exits.
+          child.once('error', (err?: Error) => {
+            rc.log(`Could not start the run for ${job.card.identifier} (${err?.message ?? 'unknown error'}).`);
+            ended();
+          });
+        }
+      }
+      if (!children.size) return 0;
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, deps.waitMs);
+        wake = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+      });
+      wake = () => {};
+    }
   } catch (err) {
     rc.log(`Error: ${(err as Error).message}`);
     return 1;

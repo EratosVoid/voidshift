@@ -31,18 +31,26 @@ export interface AgentsCurrent {
   runDir?: string;
   checking?: boolean;
   elapsedMinutes?: number;
+  workspace?: string;
 }
 
 export interface AgentsStatus {
   engine?: string;
   runner: 'running' | 'paused' | 'stopped';
   lastTick: { at: string; line: string } | null;
+  // The first live run, or the runner checking for work.
   current: AgentsCurrent | null;
+  // Every live run, one per busy workspace. Older agents print only current.
+  running?: AgentsCurrent[];
   parked: { card: string; reason?: string }[];
   interrupted: string[];
   workflows: number;
   projects: number;
 }
+
+// The runs going on now, whichever shape the agents tool printed.
+export const liveRunsOf = (agents: AgentsStatus | null | undefined): AgentsCurrent[] =>
+  agents?.running ?? (agents?.current?.card ? [agents.current] : []);
 
 export interface StepRecord {
   step: string;

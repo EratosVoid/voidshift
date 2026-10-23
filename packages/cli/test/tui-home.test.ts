@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import React from 'react';
 import { render } from 'ink-testing-library';
-import { awakeLines, checksLines, checksView, clampFocus, countsLine, Home, homeHints, liveCard, memoryLines, nextSection, parkedRows, runnerLines, sectionsFor } from '../src/tui/home.ts';
+import { awakeLines, checksLines, checksView, clampFocus, countsLine, Home, homeHints, liveCard, liveCards, memoryLines, nextSection, parkedRows, runnerLines, sectionsFor } from '../src/tui/home.ts';
 import { emptyState, runsThisWeek, updateNotice, type AgentsStatus, type DataState, type RunItem } from '../src/tui/data.ts';
 import { barParts, cycle, editText, fitCell } from '../src/tui/widgets.ts';
 import { duration, minutesText, secondsToNextCheck, truncate } from '../src/tui/format.ts';
@@ -99,9 +99,24 @@ test('steps not reached yet are pending, and a sent-back check shows failed', ()
       ],
     },
   };
-  const live = liveCard({ ...base, runs: [sentBack], agents: { ...agents, current: { ...agents.current!, step: 'Dev', round: 1 } } }, NOW)!;
+  const live = liveCard({ ...base, runs: [sentBack], agents: { ...agents, current: { ...agents.current!, step: 'Dev', round: 2 } } }, NOW)!;
   assert.deepEqual(live.steps.map((s) => s.state), ['running', 'failed']);
-  assert.equal(live.round, 2);
+  assert.equal(live.round, 2, 'the lock round is 1-based already');
+  assert.equal(liveCard({ ...base, agents: { ...agents, current: { ...agents.current!, round: 1 } } }, NOW)!.round, 1);
+});
+
+// The live card above, plus a second one in another workspace.
+const twoRunning: AgentsStatus = {
+  ...agents,
+  running: [
+    { ...agents.current!, workspace: 'tether' },
+    { pid: 2, card: 'DS06-12', title: 'Invoice export', workflow: 'erp-build', step: 'Dev', round: 1, startedAt: iso(4), elapsedMinutes: 4, workspace: 'solvia' },
+  ],
+};
+
+test('each workspace with a run gets its own live card', () => {
+  const lives = liveCards({ ...base, agents: twoRunning }, NOW);
+  assert.deepEqual(lives.map((l) => [l.workspace, l.card]), [['solvia', 'DS06-12'], ['tether', 'ENG-1412']]);
 });
 
 test('no live card without a card in the lock', () => {
@@ -209,6 +224,15 @@ test('Home renders the live card, a parked card and the other sections', () => {
   }
   assert.deepEqual(spy.hints?.map((h) => h.key), ['tab', 'enter', 'p', 'a', ':', '?', 'q']);
   r.unmount();
+});
+
+test('Home shows one live block per workspace, named next to the workflow', () => {
+  const spy = newSpy();
+  const r = render(withFakes(spy, fakeData({ ...base, agents: twoRunning, checks: [] }), React.createElement(Home)));
+  const frame = r.lastFrame()!;
+  r.unmount();
+  for (const want of ['▶ ENG-1412', 'tether · tether-relay-build', '▶ DS06-12', 'Invoice export', 'solvia · erp-build']) assert.ok(frame.includes(want), `missing "${want}" in:\n${frame}`);
+  assert.ok(!frame.includes('Checking'));
 });
 
 test('Home hides sections of tools that are not added', () => {

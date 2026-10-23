@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DEFAULTS, TEMPLATES, agentsDir, defsDir, describeWorkflow, describeSteps, hasWork, isProducer, migrate, readAgentsConfig, resolveStep, writeAgentsConfig, type StepDef } from '../src/config.ts';
+import { DEFAULTS, TEMPLATES, agentsDir, defsDir, describeWorkflow, describeSteps, hasWork, isProducer, matchesProject, migrate, readAgentsConfig, resolveProject, resolveStep, workspaceContext, workspaceOf, workspacesInUse, writeAgentsConfig, type StepDef } from '../src/config.ts';
 
 test('templates', () => {
   assert.equal(describeSteps(TEMPLATES.build!.steps), 'Dev → QA');
@@ -23,6 +23,38 @@ test('old team-to-repo configs become a workflow that owns its trigger', () => {
     'plexa-build': { triggers: [{ source: 'linear', team: 'PLX', label: 'vs-plan' }], steps: ['vs-dev', 'vs-qa'], maxRounds: 3, project: 'plexa' },
   });
   assert.equal((m as Record<string, unknown>).repos, undefined);
+});
+
+test('a config with only projects reads as one default workspace', () => {
+  const configDir = mkdtempSync(join(tmpdir(), 'vsf-config-'));
+  mkdirSync(agentsDir(configDir), { recursive: true });
+  writeFileSync(join(agentsDir(configDir), 'config.json'), JSON.stringify({ projects: { a: { path: '/a' }, b: { path: '/b' } } }));
+  const config = readAgentsConfig(configDir);
+  assert.deepEqual(config.workspaces, {});
+  assert.deepEqual(workspacesInUse(config), ['default']);
+  assert.equal(workspaceOf(config.projects.a), 'default');
+  assert.equal(resolveProject(config, { project: 'b' }, { projectName: 'Anything' })?.name, 'b');
+});
+
+test('explicit matches in any workspace win over the workflow project', () => {
+  const projects = { relay: { path: '/r' }, erp: { path: '/e', workspace: 'solvia', match: ['DS06'] }, voidtrack: { path: '/v', workspace: 'devvoid', match: ['VoidTrack'] } };
+  assert.equal(resolveProject({ projects }, { project: 'relay' }, { projectName: 'DS06 Atleurope ERP' })?.name, 'erp');
+  assert.equal(resolveProject({ projects }, { project: 'relay' }, { projectName: 'voidtrack' })?.name, 'voidtrack');
+  assert.equal(resolveProject({ projects }, { project: 'relay' }, { projectName: 'DS07 Other' })?.name, 'relay');
+  assert.equal(resolveProject({ projects }, { project: 'relay' }, {})?.name, 'relay', 'a scheduled run has no tracker project');
+  assert.equal(resolveProject({ projects }, { project: 'gone' }, {}), null);
+  assert.ok(matchesProject('ds06', 'DS06 Atleurope ERP'));
+  assert.ok(!matchesProject('DS0', 'DS06 Atleurope ERP'));
+});
+
+test('a workspace context comes from its file, or CONTEXT.md in its root', () => {
+  const root = mkdtempSync(join(tmpdir(), 'vsf-ws-'));
+  assert.equal(workspaceContext({ workspaces: { w: { root } } }, 'w'), '');
+  writeFileSync(join(root, 'CONTEXT.md'), 'Solvia clients\n');
+  assert.equal(workspaceContext({ workspaces: { w: { root } } }, 'w'), 'Solvia clients');
+  writeFileSync(join(root, 'other.md'), 'Other');
+  assert.equal(workspaceContext({ workspaces: { w: { root, context: 'other.md' } } }, 'w'), 'Other');
+  assert.equal(workspaceContext({ workspaces: {} }, 'default'), '');
 });
 
 test('dead browser-check settings are dropped', () => {
