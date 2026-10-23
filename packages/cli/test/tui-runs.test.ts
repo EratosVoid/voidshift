@@ -6,9 +6,10 @@ import { join } from 'node:path';
 import React from 'react';
 import { render } from 'ink-testing-library';
 import '../src/tui/screens.ts';
-import { Runs, cancelSpec, filterRuns, isLive, logStepOf, manualLogPath, outcomeOf, roundsOf, runsDeps, runsKey, stepsLabel, windowStart } from '../src/tui/screens/runs.ts';
+import { Runs, cancelSpec, filterRuns, isLive, logStepOf, manualLogPath, listRuns, attemptsOf, outcomeOf, roundsOf, runMs, runsDeps, runsKey, stepMark, stepsLabel, windowStart } from '../src/tui/screens/runs.ts';
 import { LogView, appendChunk, logFor, scrollBy, visibleRows, wrapLines } from '../src/tui/screens/log.ts';
 import { nextTab } from '../src/tui/screens/agents.ts';
+import { theme } from '../src/tui/theme.ts';
 import type { AgentsStatus, RunItem, StepRecord } from '../src/tui/data.ts';
 import { fakeData, newSpy, withFakes } from './tui-helpers.ts';
 
@@ -41,7 +42,7 @@ test('steps label, rounds and outcome', () => {
   assert.equal(roundsOf([step('vs-dev', 'Dev'), step('vs-qa', 'QA'), step('vs-dev', 'Dev')]), 2);
   assert.equal(roundsOf([]), 0);
   assert.equal(outcomeOf(r, { agents: agents('ENG-1') }), 'running');
-  assert.equal(outcomeOf(r, { agents: agents('ENG-2') }), 'interrupted');
+  assert.equal(outcomeOf(r, { agents: agents('ENG-2') }), 'failed');
   assert.equal(isLive(r, { agents: agents('ENG-1') }), true);
   assert.equal(isLive(run('ENG-1'), { agents: agents('ENG-1') }), false);
   assert.equal(logStepOf(r)?.step, 'vs-qa');
@@ -53,7 +54,76 @@ test('a run is live while any workspace is on it', () => {
   const two: AgentsStatus = { ...agents('ENG-2'), running: [{ pid: 2, card: 'ENG-2', workspace: 'a' }, { pid: 3, card: 'ENG-1', workspace: 'b' }] };
   assert.equal(outcomeOf(r, { agents: two }), 'running');
   assert.equal(isLive(r, { agents: two }), true);
-  assert.equal(outcomeOf(r, { agents: { ...two, running: [] } }), 'interrupted');
+  assert.equal(outcomeOf(r, { agents: { ...two, running: [] } }), 'failed');
+});
+
+test('a dead run ends at its last step, never at now', () => {
+  const r = run('ENG-1', {}, 'running');
+  r.record!.steps[1] = step('vs-qa', 'QA', { endedAt: undefined, result: undefined });
+  const far = Date.parse('2026-10-25T00:00:00.000Z');
+  // Last step started 13:51, so the dead run took 0.
+  assert.equal(runMs(r, far, false), 0);
+  assert.equal(runMs(r, far, true), far - Date.parse('2026-10-20T13:51:00.000Z'));
+  r.record!.steps[0] = step('vs-dev', 'Dev', { endedAt: '2026-10-20T13:56:00.000Z' });
+  r.record!.steps[1] = step('vs-qa', 'QA', { startedAt: '2026-10-20T13:56:00.000Z', endedAt: '2026-10-20T14:00:00.000Z' });
+  assert.equal(runMs(r, far, false), 9 * 60_000);
+  r.record!.endedAt = '2026-10-20T14:30:00.000Z';
+  assert.equal(runMs(r, far, false), 39 * 60_000);
+});
+
+test('a failed step never gets a green check', () => {
+  assert.equal(stepMark(step('a', 'A', { result: 'failed' })).glyph, '✗');
+  assert.equal(stepMark(step('a', 'A', { result: 'failed' })).colour, theme.red);
+  assert.equal(stepMark(step('a', 'A', { result: 'stopped' })).glyph, '-');
+  assert.equal(stepMark(step('a', 'A', { result: 'BLOCKED' })).glyph, '✗');
+});
+
+test('cron runs are hidden, shown per job, and cards collapse to the latest run', () => {
+  const cron = run('TETHERQASCOUT-1', { dir: '/tmp/runs/c/a' });
+  cron.record!.source = 'cron';
+  cron.record!.workflow = 'scout';
+  const other = run('TETHERQASCOUT-2', { dir: '/tmp/runs/c/b' });
+  other.record!.source = 'cron';
+  other.record!.workflow = 'other';
+  const newer = run('ENG-1', { dir: '/tmp/runs/ENG-1/b' });
+  const older = run('ENG-1', { dir: '/tmp/runs/ENG-1/a' });
+  const all = [cron, newer, other, older];
+  assert.deepEqual(listRuns(all, null).map((r) => r.dir), ['/tmp/runs/ENG-1/b']);
+  assert.deepEqual(listRuns(all, 'scout').map((r) => r.card), ['TETHERQASCOUT-1']);
+  assert.equal(attemptsOf(all, 'ENG-1').length, 2);
+});
+
+test('Runs shows attempts, hides ROUNDS without rounds, and cron retry toasts', async () => {
+  const spy = newSpy();
+  runsDeps.fetchLabels = async () => null;
+  const newer = run('ENG-1412', { dir: '/tmp/runs/n' }, 'verified');
+  const older = run('ENG-1412', { dir: '/tmp/runs/o' }, 'parked');
+  older.record!.startedAt = '2026-10-19T13:51:00.000Z';
+  const wf = (maxRounds: number) => [{ name: 'tether-relay-build', triggers: [], steps: ['vs-dev', 'vs-qa'], maxRounds, project: 'p' }];
+  const one = render(withFakes(spy, fakeData({ runs: [newer, older], agents: agents('X'), workflows: wf(1) }), React.createElement(Runs, { params: {} }), { columns: 110, rows: 40 }));
+  await tick(50);
+  const f = one.lastFrame() ?? '';
+  assert.match(f, /Attempt 2 of 2/);
+  assert.match(f, /Oct 19 .*parked/);
+  assert.ok(!f.includes('ROUNDS'));
+  assert.ok(!f.includes('No PR yet'));
+  const many = render(withFakes(spy, fakeData({ runs: [newer], agents: agents('X'), workflows: wf(3) }), React.createElement(Runs, { params: {} }), { columns: 110, rows: 40 }));
+  await tick(50);
+  assert.match(many.lastFrame() ?? '', /ROUNDS/);
+  assert.match(many.lastFrame() ?? '', /1\/3/);
+  const cron = run('TETHERQASCOUT-1', {}, 'verified');
+  cron.record!.source = 'cron';
+  cron.record!.workflow = 'scout';
+  const job = render(withFakes(spy, fakeData({ runs: [cron, newer], agents: agents('X'), workflows: [] }), React.createElement(Runs, { params: { job: 'scout' } }), { columns: 110, rows: 40 }));
+  await tick(50);
+  const jf = job.lastFrame() ?? '';
+  assert.match(jf, /scout runs, newest first/);
+  assert.match(jf, /TETHERQASCOUT-1/);
+  assert.ok(!jf.includes('ENG-1412  '));
+  job.stdin.write('r');
+  await tick(50);
+  assert.deepEqual(spy.toasts, ['Scheduled runs are not retried. The job runs again on its schedule.']);
+  assert.equal(spy.ran.length, 0);
 });
 
 test('key map and tab keys', () => {
@@ -125,7 +195,8 @@ test('Runs renders the table, the detail and the labels', async () => {
   r.record!.prUrl = 'https://github.com/o/r/pull/1502';
   const data = fakeData({ runs: [r, run('ENG-1399')], agents: agents('ENG-1412'), workflows: [{ name: 'tether-relay-build', triggers: [], steps: ['vs-dev', 'vs-qa'], maxRounds: 3, project: 'p' }] });
   const ui = render(withFakes(spy, data, React.createElement(Runs, { params: {} }), { columns: 110, rows: 40 }));
-  await tick(50);
+  // The labels arrive after a debounce, later on a slow machine.
+  for (let i = 0; i < 40 && !/labels vs-working/.test(ui.lastFrame() ?? ''); i++) await tick(50);
   const f = ui.lastFrame() ?? '';
   assert.match(f, /Runs, newest first/);
   assert.match(f, /ENG-1412/);

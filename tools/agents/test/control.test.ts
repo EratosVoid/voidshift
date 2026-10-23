@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { cancelCurrent, countRounds, isInterrupted, formatRunLine, parseAge, parsePlistArgs, pickCancel, scanRunnerErrors, trackerWarnings, workingLine, workspaceLines } from '../src/control.ts';
+import { cancelCurrent, countRounds, isInterrupted, formatRunLine, jobSummaries, shownOutcome, parseAge, parsePlistArgs, pickCancel, scanRunnerErrors, trackerWarnings, workingLine, workspaceLines } from '../src/control.ts';
 import type { Tracker, Trackers } from '../src/tracker.ts';
+import { readAgentsConfig, writeAgentsConfig, type Workflow } from '../src/config.ts';
 import { lockPath, readWindow, workspaceLockPath, writeCurrent, writeWindow, writeWorkspace, type RunEntry } from '../src/state.ts';
 import { controlCommands } from '../src/control.ts';
 import { windowLine } from '../src/usage.ts';
@@ -49,7 +50,9 @@ test('isInterrupted flags running records that are not live', () => {
   assert.equal(isInterrupted(e, []), true);
   assert.equal(isInterrupted(e, [{ pid: 1, card: 'ENG-12', runDir: '/x' }]), false);
   assert.equal(isInterrupted(e, [{ pid: 1, card: 'ENG-3', runDir: '/y', workspace: 'a' }, { pid: 2, card: 'ENG-12', runDir: '/x', workspace: 'b' }]), false, 'a second live run');
-  assert.match(formatRunLine(e), /interrupted/);
+  assert.match(formatRunLine(e), /failed/);
+  assert.equal(shownOutcome(e, []), 'failed');
+  assert.equal(shownOutcome(e, [{ pid: 1, card: 'ENG-12', runDir: '/x' }]), 'running');
 });
 
 test('a stale lock is cleared without any signal and the run is marked cancelled', async () => {
@@ -198,4 +201,80 @@ test('show lists tokens and cost per step and a total', async () => {
   assert.equal(await controlCommands.show!(['ENG-12'], ctx), 0);
   assert.ok(logs.some((l) => /^  Dev .* 1\.2k in, 300 out, \$0\.50 est\./.test(l)), logs.join('\n'));
   assert.ok(logs.includes('Usage: 1.2k in, 300 out, $0.50 est., opus'), logs.join('\n'));
+});
+
+test('a stale run shows its duration up to the last sign of life', () => {
+  const steps = [{ step: 'vs-dev', label: 'Dev', startedAt: '2026-10-20T10:00:00.000Z', endedAt: '2026-10-20T10:07:00.000Z' }];
+  const e: RunEntry = { card: 'ENG-12', stamp: 'x', dir: '/x', record: record({ outcome: 'running', endedAt: undefined, steps }), logs: [] };
+  assert.match(formatRunLine(e, Date.parse('2026-10-21T10:00:00.000Z'), []), /failed  7m$/);
+});
+
+// Writes a run folder with a record.
+const writeRunFixture = (configDir: string, card: string, stamp: string, over = {}) => {
+  const runDir = join(configDir, 'agents', 'runs', card, stamp);
+  mkdirSync(runDir, { recursive: true });
+  writeFileSync(join(runDir, 'run.json'), JSON.stringify(record({ card, ...over })));
+};
+
+const nightly = { triggers: [{ source: 'cron', schedule: '0 5 * * *', task: 'Scout' }], steps: ['vs-dev'], maxRounds: 1, project: 'p' } as unknown as Workflow;
+
+const setup = () => {
+  const configDir = mkdtempSync(join(tmpdir(), 'vsf-ctl-'));
+  writeAgentsConfig(configDir, { ...readAgentsConfig(configDir), workflows: { nightly } });
+  const logs: string[] = [];
+  const ctx = { configDir, log: (l: string) => logs.push(l) } as unknown as ToolContext;
+  return { configDir, logs, ctx };
+};
+
+const nowIso = (minutesAgo: number) => new Date(Date.now() - minutesAgo * 60_000).toISOString();
+const cronRun = (outcome: string, minutesAgo: number, over = {}) => {
+  const at = nowIso(minutesAgo);
+  return { workflow: 'nightly', trigger: '0 5 * * *', source: 'cron', outcome, startedAt: at, endedAt: at, ...over };
+};
+
+test('status aggregates jobs with handed counts and the last failure', async () => {
+  const { configDir, logs, ctx } = setup();
+  const stamp = (n: number) => `2026-10-2${n}T10-00-00-000Z`;
+  writeRunFixture(configDir, 'TETHERQASCOUT-1', stamp(1), cronRun('done', 30, { steps: [{ step: 's', label: 'Scout', startedAt: nowIso(31), handoffs: ['ENG-1', 'ENG-2'] }] }));
+  writeRunFixture(configDir, 'TETHERQASCOUT-2', stamp(2), cronRun('failed', 10, { reason: 'Boom.', steps: [{ step: 's', label: 'Scout', startedAt: nowIso(11), summary: 'hi', handoffs: ['ENG-3'] }] }));
+  const [job] = jobSummaries(readAgentsConfig(configDir), (await import('../src/state.ts')).listRuns(configDir), []);
+  assert.equal(job!.workflow, 'nightly');
+  assert.equal(job!.last!.outcome, 'failed');
+  assert.equal(job!.last!.summary, 'hi');
+  assert.ok(job!.lastOkAt);
+  assert.deepEqual(job!.today, { runs: 2, failed: 1, handed: 3 });
+  assert.equal(await controlCommands.status!([], ctx), 0);
+  assert.ok(logs.some((l) => /^Job nightly \(cron 0 5 \* \* \*\): last failed \d\d:\d\d \(Boom\), 2 runs today, 1 failed, 3 handed\.$/.test(l)), logs.join('\n'));
+});
+
+test('status lists failed cards from their latest run only, and ignores cron runs', async () => {
+  const { configDir, logs, ctx } = setup();
+  writeRunFixture(configDir, 'ENG-1', '2026-10-20T10-00-00-000Z', { outcome: 'failed', reason: 'Old.' });
+  writeRunFixture(configDir, 'ENG-1', '2026-10-21T10-00-00-000Z', { outcome: 'verified' });
+  writeRunFixture(configDir, 'ENG-2', '2026-10-21T10-00-00-000Z', { outcome: 'failed', reason: 'Bad build.' });
+  writeRunFixture(configDir, 'ENG-3', '2026-10-21T10-00-00-000Z', { outcome: 'running', endedAt: undefined });
+  writeRunFixture(configDir, 'CRON-1', '2026-10-21T10-00-00-000Z', cronRun('failed', 5));
+  assert.equal(await controlCommands.status!(['--json'], ctx), 0);
+  const out = JSON.parse(logs.join('\n'));
+  assert.deepEqual(out.failed.map((f: { card: string }) => f.card).sort(), ['ENG-2', 'ENG-3']);
+  assert.deepEqual(out.interrupted, []);
+  assert.equal(out.failed.find((f: { card: string }) => f.card === 'ENG-2').reason, 'Bad build.');
+});
+
+test('runs hides scheduled runs unless --jobs is given', async () => {
+  const { configDir, logs, ctx } = setup();
+  writeRunFixture(configDir, 'ENG-1', '2026-10-21T10-00-00-000Z', {});
+  writeRunFixture(configDir, 'CRON-1', '2026-10-21T11-00-00-000Z', cronRun('done', 5));
+  await controlCommands.runs!([], ctx);
+  assert.deepEqual(logs.map((l) => l.split('  ')[0]), ['ENG-1']);
+  logs.length = 0;
+  await controlCommands.runs!(['--jobs'], ctx);
+  assert.deepEqual(logs.map((l) => l.split('  ')[0]), ['CRON-1']);
+});
+
+test('retry refuses a scheduled run', async () => {
+  const { configDir, logs, ctx } = setup();
+  writeRunFixture(configDir, 'CRON-1', '2026-10-21T11-00-00-000Z', cronRun('failed', 5));
+  assert.equal(await controlCommands.retry!(['CRON-1'], ctx), 1);
+  assert.deepEqual(logs, ['CRON-1 is a scheduled run. vsf agents run --workflow nightly fires it now.']);
 });

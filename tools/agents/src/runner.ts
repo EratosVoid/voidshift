@@ -20,14 +20,14 @@ import {
 } from './workflow.ts';
 import { DEFAULTS, agentsDir, hasWork, isCardTrigger, resolveProject, resolveStep, stepId, stepIdLabel, workspaceContext, workspaceOf, type AgentsConfig, type ResolvedStep, type Workflow, type Project, type Trigger } from './config.ts';
 import { lastDue, parseCron } from './cron.ts';
-import { runAgent, stopAgents } from './engine.ts';
-import { commitsAhead, enforceCommitPolicy, defaultBranch, ensureDraftPr, ensureWorktree, headSha, markReady, push, resetWorktree, waitForChecks, waitForPrHead } from './git.ts';
+import { runAgent, runCommand, stopAgents } from './engine.ts';
+import { commitsAhead, enforceCommitPolicy, defaultBranch, ensureDraftPr, ensureWorktree, headSha, markReady, push, removeWorktree, resetWorktree, waitForChecks, waitForPrHead } from './git.ts';
 import type { Card } from './linear.ts';
 import { noTracker, type Tracker, type Trackers } from './tracker.ts';
 import { recall, syncMemory, vaultPath } from './memory.ts';
 import type { RunEvent, RunKind } from './notify.ts';
 import { claudeSettingsFile, readRules, rulesSection } from './profile.ts';
-import { acquireWorkspace, addUsage, clearCurrent, heldByOther, isPaused, liveRuns, readCurrent, readPending, readWindow, releaseWorkspace, writeCurrent, writePending, writeRun, writeWorkspace, readCronState, writeCronState, type Current, type Pending, type RunRecord, type StepRecord } from './state.ts';
+import { acquireWorkspace, addUsage, clearCurrent, closeStale, heldByOther, isPaused, liveRuns, queueHandoffs, readCurrent, readHandoffs, readPending, readWindow, releaseWorkspace, takeHandoff, writeHandoffs, type Handoff, writeCurrent, writePending, writeRun, writeWorkspace, readCronState, writeCronState, type Current, type Pending, type RunRecord, type StepRecord, type Usage } from './state.ts';
 import { WINDOW_MS, clock, refreshWindow, windowHold, windowStale } from './usage.ts';
 
 const stamp = () => new Date().toISOString().replace(/[:.]/g, '-');
@@ -83,6 +83,11 @@ export function summarize(output: string): string {
   return output.split('\n').map((l) => l.trim()).filter(Boolean).slice(0, 3).join(' ').slice(0, 300);
 }
 
+// The last non-empty line of what a command printed, for run.json.
+export function lastLine(output: string): string {
+  return output.split('\n').map((l) => l.trim()).filter(Boolean).at(-1)?.slice(0, 300) ?? '';
+}
+
 // The run in progress, so a cancel signal can mark it.
 let active: { record: RunRecord; runDir: string } | null = null;
 
@@ -95,7 +100,7 @@ const stageOf = (d: ResolvedStep) => LABELS.stage[d.builtin ?? ''] ?? LABELS.wor
 // run of consecutive checks) sends its findings back to the nearest earlier
 // step that produces something, Plan or Dev, and the workflow continues from
 // there, until everything passes or the loop cap parks the card.
-export async function runCard(card: Card, trigger: Trigger, workflowName: string, workflow: Workflow, project: Project, rc: RunContext, opts: { from?: string } = {}): Promise<'verified' | 'changes' | 'parked'> {
+export async function runCard(card: Card, trigger: Trigger, workflowName: string, workflow: Workflow, project: Project, rc: RunContext, opts: { from?: string } = {}): Promise<'verified' | 'done' | 'changes' | 'parked' | 'failed'> {
   const { config, log } = rc;
   // A scheduled run has no card, so it has nothing to write back to.
   const linear: Tracker = isCardTrigger(trigger) ? rc.trackers(trigger.source) : noTracker;
@@ -106,6 +111,7 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
   // Write back settings apply to card runs; a scheduled run has nothing to write to.
   const writeBack = isCardTrigger(trigger) ? (workflow.writeBack ?? {}) : {};
   const labelsOn = writeBack.labels !== false;
+  const cronRun = trigger.source === 'cron';
   const startedAt = new Date().toISOString();
   const workspace = workspaceOf(project);
   const record: RunRecord = { card: card.identifier, title: card.title, url: card.url || undefined, workflow: workflowName, trigger: label || (trigger.source === 'cron' ? trigger.schedule : ''), source: trigger.source, steps: [], outcome: 'running', workspace, startedAt };
@@ -124,14 +130,14 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
     save();
     return rec;
   };
-  const end = (rec: StepRecord, result: string, output?: string, logFile?: string) => {
+  const end = (rec: StepRecord, result: string, output?: string, logFile?: string, command = false) => {
     rec.endedAt = new Date().toISOString();
     rec.result = result;
-    if (output !== undefined) rec.summary = summarize(output);
+    if (output !== undefined) rec.summary = command ? lastLine(output) : summarize(output);
     if (logFile) rec.log = basename(logFile);
     save();
   };
-  const done = <T extends 'verified' | 'changes' | 'parked'>(outcome: T, reason?: string): T => {
+  const done = <T extends 'verified' | 'done' | 'changes' | 'parked' | 'failed'>(outcome: T, reason?: string): T => {
     record.outcome = outcome;
     if (reason) record.reason = reason;
     record.endedAt = new Date().toISOString();
@@ -169,8 +175,10 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
     }
   };
 
-  async function park(reason: string, kind: 'parked' | 'failed' = 'parked'): Promise<'parked'> {
-    say(`parked: ${reason}`);
+  async function park(reason: string, kind: 'parked' | 'failed' = 'parked'): Promise<'parked' | 'failed'> {
+    say(`${kind === 'failed' ? 'failed' : 'parked'}: ${reason}`);
+    // The outcome is on disk before any tracker call, so a hung or failed write never loses it.
+    const outcome = done(kind, reason);
     const comment = `**Parked:** ${reason}${lastFindings ? `\n\n${lastFindings}` : ''}\n\nFix the cause, then add \`${label}\` again to retry.`;
     const add = labelsOn ? [LABELS.parked, ...(loops ? [LABELS.version(loops)] : [])] : [];
     let commented = false;
@@ -186,16 +194,19 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
         writePending(rc.configDir, [...readPending(rc.configDir), { card: card.identifier, comment: commented ? '' : comment, drop: [label], add, dropStatus: labelsOn, source: trigger.source }]);
       }
     }
-    const outcome = done('parked', reason);
     await ping(kind, reason);
     return outcome;
   }
 
+  // Set once a worktree exists, so a scheduled run can remove it at the end.
+  let worktreeMade = '';
   try {
     if (!existsSync(join(project.path, '.git'))) throw new Park(`The project folder ${project.path} is not a git repository on this Mac.`);
     const steps = workflow.steps.map((s) => resolveStep(s, config, config.folders?.[workflowName]));
     const from = opts.from ? steps.findIndex((d) => d.id === opts.from) : 0;
     if (from < 0) throw new Park(`Workflow ${workflowName} has no ${stepIdLabel(opts.from!)} step.`);
+    // Command steps need no branch of their own: a run of only those works in the project folder.
+    const commandOnly = steps.slice(from).every((d) => d.command);
     // A scheduled run has no card to plan on, so its task is the plan unless a Plan step writes one.
     let plan = isCardTrigger(trigger) ? latestPlan(await linear.comments(card.identifier)) : card.description ?? null;
     if (!plan && needsPlan(steps, from)) {
@@ -218,9 +229,12 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
     if (pulled) say(pulled);
     const context = workspaceContext(config, workspace);
     const known = [recall(rc.selfCommand, rc.configDir, `${workflow.project} ${card.title}\n${card.description ?? ''}`), context ? `# Workspace\n\n${context}` : '', vault ? memoryNote(vault) : '', rules].filter(Boolean).join('\n\n');
-    const worktree = join(agentsDir(rc.configDir), 'worktrees', card.identifier);
-    ensureWorktree(project.path, worktree, card.branchName, base);
-    say(`working in ${worktree} on ${card.branchName}`);
+    const worktree = commandOnly ? project.path : join(agentsDir(rc.configDir), 'worktrees', card.identifier);
+    if (!commandOnly) {
+      ensureWorktree(project.path, worktree, card.branchName, base);
+      worktreeMade = worktree;
+      say(`working in ${worktree} on ${card.branchName}`);
+    }
 
     const findings = new Map<number, string>();
     const runs = { plan: 0, dev: 0 };
@@ -232,18 +246,34 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
     // away, so a later Dev step never commits them, and an agent process that
     // fails ends the run as failed with its own error.
     async function agent(def: ResolvedStep, rec: StepRecord, log: string, prompt: string) {
-      const r = await runAgent({ engine: def.engine, model: def.model, cwd: worktree, vault, settingsFile, write: def.write, logFile: log, timeoutMs: def.timeoutMs, platform: rc.platform, prompt });
+      const r: { ok: boolean; output: string; error?: string; usage?: Usage } = def.command
+        ? await runCommand({ command: def.command, cwd: worktree, logFile: log, timeoutMs: def.timeoutMs, env: { VSF_CARD: card.identifier, VSF_RUN_DIR: runDir, VSF_WORKFLOW: workflowName } })
+        : await runAgent({ engine: def.engine, model: def.model, cwd: worktree, vault, settingsFile, write: def.write, logFile: log, timeoutMs: def.timeoutMs, platform: rc.platform, prompt });
       // Saved with the step's end, failed or not.
       if (r.usage) {
         rec.usage = r.usage;
         record.usage = addUsage(record.usage, r.usage);
       }
-      if (!def.write || def.builtin === 'vs-qa') resetWorktree(worktree);
+      if (!def.command && (!def.write || def.builtin === 'vs-qa')) resetWorktree(worktree);
       if (!r.ok) {
-        end(rec, 'failed', r.output, log);
+        end(rec, 'failed', r.output, log, !!def.command);
         throw new Park(`The ${def.label} step failed: ${r.error}. Log: ${basename(log)}`, 'failed');
       }
       return r;
+    }
+
+    // Cards a finished step names with HANDOFF lines go to the workflow it hands to.
+    async function handOff(def: ResolvedStep, rec: StepRecord, output: string) {
+      if (!def.handoff) return;
+      if (!config.workflows[def.handoff]) {
+        say(`cannot hand cards to ${def.handoff}: no such workflow`);
+        return;
+      }
+      const cards = [...new Set([...output.matchAll(/^\s*HANDOFF:\s*([A-Za-z][A-Za-z0-9]*-\d+)\s*$/gm)].map((m) => m[1]!.toUpperCase()))];
+      queueHandoffs(rc.configDir, def.handoff, cards, card.identifier);
+      rec.handoffs = cards;
+      save();
+      if (cards.length) say(`handed ${cards.join(', ')} to ${def.handoff}`);
     }
 
     async function check(def: ResolvedStep, round: number): Promise<StepResult> {
@@ -281,6 +311,7 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
       const r = await agent(def, rec, log, buildPrompt({ skill: def.prompt(), card, plan: planText(), base, round, extra: [known, ciNote, UNATTENDED].filter(Boolean).join('\n\n') }));
       const verdict = parseVerdict(r.output);
       end(rec, verdict, r.output, log);
+      await handOff(def, rec, r.output);
       return { step: label, verdict, report: r.output };
     }
 
@@ -332,6 +363,7 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
         const result = parseDevResult(r.output);
         end(rec, result.status === 'blocked' ? 'blocked' : 'done', r.output, log);
         if (result.status === 'blocked') throw new Park(`The plan agent stopped: ${result.reason}`);
+        await handOff(def, rec, r.output);
         plan = planBody(r.output);
         planToPost = plan;
         runs.plan++;
@@ -351,6 +383,7 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
         const result = parseDevResult(dev.output);
         end(rec, result.status === 'blocked' ? 'blocked' : 'done', dev.output, log);
         if (result.status === 'blocked') throw new Park(`The dev agent stopped: ${result.reason}`);
+        await handOff(def, rec, dev.output);
         if (commitsAhead(worktree, base) === 0) throw new Park('The dev agent made no commits.');
         // A round sent back with findings must change something, or QA would
         // just check the same commit again.
@@ -369,7 +402,8 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
         const rec = begin(def);
         const log = logFile(def.id);
         const r = await agent(def, rec, log, buildPrompt({ skill: def.prompt(), card, plan: plan ?? '(none)', base, round: loops || 1, extra: [known, UNATTENDED].filter(Boolean).join('\n\n') }));
-        end(rec, 'done', r.output, log);
+        end(rec, 'done', r.output, log, !!def.command);
+        await handOff(def, rec, r.output);
       }
       findings.delete(i);
       i++;
@@ -384,20 +418,22 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
     if (writeBack.comment !== false) {
       await linear.comment(card, `**All checks passed.**${prUrl ? ` PR ready: ${prUrl}` : ''}${!moved ? `\n\n(No "${state}" state on this team, so the card was not moved.)` : ''}`);
     }
-    say('verified');
-    done('verified');
+    say(cronRun ? 'done' : 'verified');
+    done(cronRun ? 'done' : 'verified');
   } catch (err) {
     if (err instanceof Park) return park(err.message, err.kind);
     return park(`Something went wrong: ${(err as Error).message}`, 'failed');
   } finally {
     active = null;
+    // A scheduled run that opened no pull request leaves no worktree or branch behind.
+    if (cronRun && worktreeMade && !record.prUrl) removeWorktree(project.path, worktreeMade, card.branchName);
     // Share whatever notes the agents wrote, whatever the outcome.
     const shared = syncMemory(rc.selfCommand, rc.configDir);
     if (shared) say(shared);
   }
   // Outside the try, so a ping that throws can never park a verified run.
   await ping(record.prUrl ? 'ready' : 'passed');
-  return 'verified';
+  return cronRun ? 'done' : 'verified';
 }
 
 type Job = { card: Card; trigger: Trigger; workflow: string; workspace: string };
@@ -421,6 +457,9 @@ export function cronCard(workflow: string, task: string, at: Date): Card {
     labels: [],
   };
 }
+
+// How long a handed card may wait for its run to start.
+const HANDOFF_MAX_MS = 24 * 60 * 60_000;
 
 const cronKey = (workflow: string, schedule: string) => `${workflow} ${schedule}`;
 
@@ -473,7 +512,58 @@ export async function findJobs(rc: RunContext, q: JobQuery = {}): Promise<Job[]>
     out.push({ ...job, workspace });
     return out.length >= limit;
   };
+  // Cards other workflows handed over, in the order they were queued. They
+  // need no label. Stale or unknown ones are dropped; one whose tracker cannot
+  // be read stays queued. True once the limit is reached.
+  const takeHandoffs = async (): Promise<boolean> => {
+    const queue = readHandoffs(rc.configDir);
+    const keep: Handoff[] = [];
+    let full = false;
+    for (const h of queue) {
+      if (q.workflow && h.workflow !== q.workflow) {
+        keep.push(h);
+        continue;
+      }
+      if (now.getTime() - new Date(h.at).getTime() > HANDOFF_MAX_MS) {
+        rc.log(`Dropped the handoff of ${h.card} to ${h.workflow}: it waited more than 24 hours.`);
+        continue;
+      }
+      const workflow = rc.config.workflows[h.workflow];
+      if (!workflow) {
+        rc.log(`Dropped the handoff of ${h.card} to ${h.workflow}: no such workflow.`);
+        continue;
+      }
+      const team = h.card.split('-')[0]!.toUpperCase();
+      const triggers = workflow.triggers.filter(isCardTrigger).filter((t) => t.team === team);
+      if (!triggers.length) {
+        rc.log(`Dropped the handoff of ${h.card} to ${h.workflow}: it has no trigger for team ${team}.`);
+        continue;
+      }
+      keep.push(h);
+      if (full) continue;
+      let found: { card: Card; trigger: Trigger } | null = null;
+      let failure = '';
+      for (const trigger of triggers) {
+        try {
+          found = { card: await rc.trackers(trigger.source).card(h.card), trigger };
+          break;
+        } catch (err) {
+          failure = (err as Error).message;
+        }
+      }
+      if (!found) {
+        rc.log(`Could not read ${h.card} for its handoff (${failure}). Trying again next minute.`);
+        continue;
+      }
+      const workspace = jobWorkspace(rc.config, workflow, found.card);
+      if (taken.has(workspace) || q.skip?.has(h.card) || out.some((j) => j.card.identifier === h.card)) continue;
+      if (take({ card: found.card, trigger: found.trigger, workflow: h.workflow }, workspace)) full = true;
+    }
+    if (keep.length !== queue.length) writeHandoffs(rc.configDir, keep);
+    return full;
+  };
   try {
+    if (!q.only && !q.schedule && (await takeHandoffs())) return out;
     for (const [name, workflow] of workflows) {
       for (const trigger of workflow.triggers) {
         if (!isCardTrigger(trigger)) {
@@ -675,8 +765,10 @@ export async function tick(rc: RunContext, only?: string, opts: { workflow?: str
       return 1;
     }
     held = job.workspace;
+    // A handed card leaves the queue only once its run has started.
+    if (isCardTrigger(job.trigger)) takeHandoff(rc.configDir, job.card.identifier, job.workflow);
     const outcome = await runCard(job.card, job.trigger, job.workflow, workflow, resolved.project, rc, { from: opts.from });
-    return outcome === 'verified' ? 0 : 1;
+    return outcome === 'verified' || outcome === 'done' ? 0 : 1;
   } catch (err) {
     rc.log(`Error: ${(err as Error).message}`);
     return 1;
@@ -768,6 +860,12 @@ export async function dispatch(rc: RunContext, over: Partial<DispatchDeps> = {})
     timer = setInterval(() => void readWindowNow(), WINDOW_MS);
     timer.unref();
     for (;;) {
+      // Runs whose process ended without an outcome are closed as failed.
+      try {
+        for (const card of closeStale(rc.configDir, liveRuns(rc.configDir))) rc.log(`${card} failed: the run stopped without finishing.`);
+      } catch {
+        // looked at again next pass
+      }
       if (deps.reload) rc = { ...rc, config: deps.reload() };
       await flushPending(rc);
       const paused = isPaused(rc.configDir);

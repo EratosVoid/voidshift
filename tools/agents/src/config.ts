@@ -30,6 +30,12 @@ export interface StepDef {
   skill?: string;
   // A prompt file, relative to the agent folder.
   prompt?: string;
+  // A shell command run in place of an agent: exit 0 is done, anything else
+  // fails the run. Its last line of output is the step's summary.
+  run?: string;
+  // A workflow the step hands cards to: every `HANDOFF: CARD-12` line in its
+  // output queues that card there as a run of its own.
+  handoff?: string;
   output: Output;
   engine?: Engine;
   model?: string;
@@ -336,6 +342,10 @@ export interface ResolvedStep {
   prompt: () => string;
   // Set for the built-in steps, whose CI wait, labels and skips stay theirs.
   builtin?: StepId;
+  // A command step's shell command; such a step runs no agent.
+  command?: string;
+  // The workflow its HANDOFF lines queue cards for.
+  handoff?: string;
 }
 
 const packDir = fileURLToPath(new URL('../pack/', import.meta.url));
@@ -358,6 +368,14 @@ export function resolveStep(step: Step, config: Pick<AgentsConfig, 'engine' | 'm
       timeoutMs: config.timeoutMinutes * 60_000, write: s.write, prompt: () => readFileSync(packSkill(step), 'utf8'), builtin: step,
     };
   }
+  // A command step runs a shell command, so it has no prompt.
+  if (step.run) {
+    return {
+      id: step.id, label: step.label ?? step.id, output: step.output, engine: step.engine ?? config.engine,
+      model: step.model ?? config.models.dev, timeoutMs: (step.timeoutMinutes ?? config.timeoutMinutes) * 60_000,
+      write: step.write ?? false, command: step.run, prompt: () => '', handoff: step.handoff,
+    };
+  }
   return {
     id: step.id,
     label: step.label ?? step.id,
@@ -371,5 +389,6 @@ export function resolveStep(step: Step, config: Pick<AgentsConfig, 'engine' | 'm
       if (!file) throw new Error(`Step ${step.id} has no prompt or skill.`);
       return readFileSync(file, 'utf8');
     },
+    handoff: step.handoff,
   };
 }

@@ -45,7 +45,7 @@ test('vsf agents validate with no folder checks the config and every folder', as
   assert.equal(await agents.commands!.validate!([], ctx), 0, logs.join('\n'));
   folder(configDir, 'bad', [{ id: 'a', output: 'none' }]);
   assert.equal(await agents.commands!.validate!([], ctx), 1);
-  assert.ok(logs.some((l) => /^bad: a needs exactly one of skill or prompt/.test(l)), logs.join('\n'));
+  assert.ok(logs.some((l) => /^bad: a needs exactly one of skill, prompt or run/.test(l)), logs.join('\n'));
 });
 
 test('folder workflows cannot be edited from the CLI', async () => {

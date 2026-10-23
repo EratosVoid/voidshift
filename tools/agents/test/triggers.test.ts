@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { lastDue, matches, parseCron } from '../src/cron.ts';
@@ -184,8 +184,8 @@ test('a scheduled run without a Plan step uses its task as the plan instead of p
   rc.config.projects.p = { path: repo, base: 'main' };
   const { runCard } = await import('../src/runner.ts');
   const outcome = await runCard(cronCard('nightly', 'Tidy up', new Date()), rc.config.workflows.nightly!.triggers[0]!, 'nightly', rc.config.workflows.nightly!, rc.config.projects.p, rc);
-  assert.equal(outcome, 'parked');
-  assert.ok(logs.some((l) => /parked: .*git fetch/.test(l)), logs.join('\n'));
+  assert.equal(outcome, 'failed');
+  assert.ok(logs.some((l) => /failed: .*git fetch/.test(l)), logs.join('\n'));
   assert.ok(!logs.some((l) => /No plan comment/.test(l)));
 });
 
@@ -260,7 +260,7 @@ async function runCron(rig: ReturnType<typeof agentRig>, workflow: Workflow, pla
 test('a custom one step prompt runs from cron with its own model, timeout and write access, and no tracker', async () => {
   const rig = agentRig('echo brief written\n');
   const { outcome, logs } = await runCron(rig, { triggers: [cron], steps: [{ id: 'brief', prompt: 'brief.md', output: 'none', model: 'haiku', timeoutMinutes: 5, write: true }], maxRounds: 1, project: 'p' });
-  assert.equal(outcome, 'verified', logs.join('\n'));
+  assert.equal(outcome, 'done', logs.join('\n'));
   const [call] = rig.calls();
   assert.match(call!.stdin, /Write the morning brief\./);
   assert.match(call!.stdin, /Brief me/);
@@ -281,14 +281,14 @@ test('the workspace context reaches the step prompt', async () => {
   rc.config.projects.p = { path: rig.repo, base: 'main', workspace: 'solvia' };
   rc.config.folders = { w: rig.defs };
   const outcome = await withPath(rig.bin, () => runCard(cronCard('w', 'Brief me', new Date()), cron, 'w', workflow, rc.config.projects.p!, rc));
-  assert.equal(outcome, 'verified', logs.join('\n'));
+  assert.equal(outcome, 'done', logs.join('\n'));
   assert.match(rig.calls()[0]!.stdin, /# Workspace\n\nSolvia clients ship to staging\./);
 });
 
 test('a custom step that fails parks the run with its stderr', async () => {
   const rig = agentRig('echo boom >&2; exit 3\n');
   const { outcome, logs } = await runCron(rig, { triggers: [cron], steps: [{ id: 'brief', prompt: 'brief.md', output: 'none' }], maxRounds: 1, project: 'p' });
-  assert.equal(outcome, 'parked');
+  assert.equal(outcome, 'failed');
   assert.ok(logs.some((l) => /The brief step failed: boom\. Log: 00-brief\.log/.test(l)), logs.join('\n'));
   assert.ok(!rig.calls()[0]!.argv.includes('acceptEdits'), 'a none step is read only by default');
 });
@@ -310,7 +310,7 @@ test('a custom verdict sends FIX back to a custom plan step until the rounds run
 test('on Linux every step skips permissions instead of an allowlist', async () => {
   const rig = agentRig('echo brief written\n');
   const { outcome, logs } = await runCron(rig, { triggers: [cron], steps: [{ id: 'brief', prompt: 'brief.md', output: 'none' }], maxRounds: 1, project: 'p' }, 'linux');
-  assert.equal(outcome, 'verified', logs.join('\n'));
+  assert.equal(outcome, 'done', logs.join('\n'));
   const { argv, stdin } = rig.calls()[0]!;
   assert.ok(argv.includes('--dangerously-skip-permissions'));
   assert.ok(!argv.includes('--allowedTools'));
@@ -325,9 +325,9 @@ test('a verdict step that crashes ends the run as failed, with no Dev round', as
     maxRounds: 3,
     project: 'p',
   });
-  assert.equal(outcome, 'parked');
+  assert.equal(outcome, 'failed');
   assert.equal(rig.calls().length, 1);
-  assert.ok(logs.some((l) => /parked: The check step failed: out of credits/.test(l)), logs.join('\n'));
+  assert.ok(logs.some((l) => /failed: The check step failed: out of credits/.test(l)), logs.join('\n'));
 });
 
 test('a plan step that crashes pings Discord as failed with its stderr', async () => {
@@ -336,7 +336,7 @@ test('a plan step that crashes pings Discord as failed with its stderr', async (
   rc.platform = 'darwin';
   const events: { kind: string; reason?: string }[] = [];
   rc.notify = async (e) => void events.push(e);
-  assert.equal(await run(), 'parked', logs.join('\n'));
+  assert.equal(await run(), 'failed', logs.join('\n'));
   assert.equal(rig.calls().length, 1);
   assert.equal(events.length, 1);
   assert.equal(events[0]!.kind, 'failed');
@@ -345,24 +345,25 @@ test('a plan step that crashes pings Discord as failed with its stderr', async (
 });
 
 test('a read step leaves a clean worktree', async () => {
-  const rig = agentRig('echo stray > stray.txt; echo "VERDICT: SHIP"\n');
+  // Each step notes what git sees before it strays, so a leftover shows up in the next one.
+  const rig = agentRig('git status --porcelain >> ../status.txt; echo stray > stray.txt; echo "VERDICT: SHIP"\n');
   const { rc, logs } = rcWith({}, {});
-  const workflow: Workflow = { triggers: [cron], steps: [{ id: 'check', prompt: 'check.md', output: 'verdict' }], maxRounds: 1, project: 'p' };
+  const workflow: Workflow = { triggers: [cron], steps: [{ id: 'check', prompt: 'check.md', output: 'verdict' }, { id: 'again', prompt: 'check.md', output: 'verdict' }], maxRounds: 1, project: 'p' };
   rc.selfCommand = [];
   rc.platform = 'darwin';
   rc.config.workflows = { w: workflow };
   rc.config.projects.p = { path: rig.repo, base: 'main' };
   rc.config.folders = { w: rig.defs };
   const card = cronCard('w', 'Brief me', new Date());
-  assert.equal(await withPath(rig.bin, () => runCard(card, cron, 'w', workflow, rc.config.projects.p!, rc)), 'verified', logs.join('\n'));
-  const worktree = join(agentsDir(rc.configDir), 'worktrees', card.identifier);
-  assert.equal(spawnSync('git', ['status', '--porcelain'], { cwd: worktree, encoding: 'utf8' }).stdout, '');
+  assert.equal(await withPath(rig.bin, () => runCard(card, cron, 'w', workflow, rc.config.projects.p!, rc)), 'done', logs.join('\n'));
+  assert.equal(readFileSync(join(agentsDir(rc.configDir), 'worktrees', 'status.txt'), 'utf8'), '');
+  assert.equal(existsSync(join(agentsDir(rc.configDir), 'worktrees', card.identifier)), false, 'a scheduled run with no PR leaves no worktree');
 });
 
 test('a custom commits step gets write access by default and its commits count', async () => {
   const rig = agentRig(`${COMMIT}echo "RESULT: DONE"\n`);
   const { outcome, logs } = await runCron(rig, { triggers: [cron], steps: [{ id: 'build', prompt: 'build.md', output: 'commits' }], maxRounds: 1, project: 'p' });
-  assert.equal(outcome, 'verified', logs.join('\n'));
+  assert.equal(outcome, 'done', logs.join('\n'));
   assert.ok(rig.calls()[0]!.argv.includes('acceptEdits'));
   assert.ok(!logs.some((l) => /made no commits/.test(l)));
 });
@@ -475,7 +476,7 @@ test('a claude step that answers in JSON saves its usage on the step and the run
   rc.config.projects.p = { path: rig.repo, base: 'main' };
   rc.config.folders = { w: rig.defs };
   const card = cronCard('w', 'Brief me', new Date());
-  assert.equal(await withPath(rig.bin, () => runCard(card, cron, 'w', workflow, rc.config.projects.p!, rc)), 'verified', logs.join('\n'));
+  assert.equal(await withPath(rig.bin, () => runCard(card, cron, 'w', workflow, rc.config.projects.p!, rc)), 'done', logs.join('\n'));
   const { listRuns } = await import('../src/state.ts');
   const run = listRuns(rc.configDir, card.identifier)[0]!.record!;
   assert.deepEqual(run.steps.map((s) => s.usage), [

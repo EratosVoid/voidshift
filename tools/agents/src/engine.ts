@@ -198,3 +198,46 @@ export function runAgent(o: RunOptions): Promise<{ ok: boolean; output: string; 
     child.stdin.end(o.prompt);
   });
 }
+
+// Runs one command step in a shell in place of an agent. Resolves with what it
+// printed on stdout, which is also logged along with stderr; a command that
+// fails also says why in `error`.
+export function runCommand(o: { command: string; cwd: string; logFile: string; timeoutMs?: number; env?: Record<string, string> }): Promise<{ ok: boolean; output: string; error?: string }> {
+  const log = createWriteStream(o.logFile, { flags: 'a' });
+  log.write(`$ ${o.command}\n\n`);
+
+  return new Promise((resolve) => {
+    const child = spawn('sh', ['-c', o.command], { cwd: o.cwd, env: { ...process.env, ...o.env }, stdio: ['ignore', 'pipe', 'pipe'] });
+    track(child);
+    let stdout = '';
+    child.stdout.on('data', (d) => {
+      stdout += d;
+      log.write(d);
+    });
+    // Only the tail is kept; the log has all of it.
+    let stderr = '';
+    child.stderr.on('data', (d) => {
+      stderr = (stderr + d).split('\n').slice(-20).join('\n');
+      log.write(d);
+    });
+    const timeoutMs = o.timeoutMs ?? 45 * 60_000;
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGTERM');
+    }, timeoutMs);
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      children.delete(child);
+      log.end(`\n${err.message}\n`);
+      resolve({ ok: false, output: err.message, error: err.message });
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      children.delete(child);
+      const minutes = Math.round(timeoutMs / 60_000);
+      const error = code === 0 ? undefined : timedOut ? `timed out after ${minutes} minute${minutes === 1 ? '' : 's'}` : errorTail(stderr) || `exit ${code}`;
+      log.end(`\nexit ${code}\n`, () => resolve({ ok: code === 0, output: stdout, ...(error ? { error } : {}) }));
+    });
+  });
+}

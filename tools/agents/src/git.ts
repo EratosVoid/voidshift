@@ -214,3 +214,9 @@ export function enforceCommitPolicy(worktree: string, from: string, policy: Comm
   if (changed) must(sh('git', ['reset', '-q', '--soft', head], worktree), 'git reset');
   return changed;
 }
+
+// Removes a worktree and its branch. Errors are ignored: either may be gone already.
+export function removeWorktree(repo: string, worktree: string, branch: string): void {
+  sh('git', ['worktree', 'remove', '--force', worktree], repo);
+  sh('git', ['branch', '-D', branch], repo);
+}

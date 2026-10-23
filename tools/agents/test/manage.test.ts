@@ -138,9 +138,15 @@ test('validateAgentFolder reports each problem', () => {
   const problems = (steps: unknown[], o: Record<string, unknown> = {}) => validateAgentFolder(agentFolder(agent(steps, o), files), folderCfg).join(' ');
   assert.match(problems([{ id: 'a', prompt: 'missing.md', output: 'none' }]), /a prompt .*missing\.md does not exist/);
   assert.match(problems([{ id: 'a', prompt: 'brief.md', output: 'poem' }]), /a output must be one of/);
-  assert.match(problems([{ id: 'a', prompt: 'brief.md', skill: 'vs-dev', output: 'none' }]), /exactly one of skill or prompt/);
-  assert.match(problems([{ id: 'a', prompt: 'brief.md', output: 'publish' }]), /takes no skill or prompt/);
-  assert.match(problems([{ id: 'a', output: 'none' }]), /exactly one of skill or prompt/);
+  assert.match(problems([{ id: 'a', prompt: 'brief.md', skill: 'vs-dev', output: 'none' }]), /exactly one of skill, prompt or run/);
+  assert.match(problems([{ id: 'a', prompt: 'brief.md', output: 'publish' }]), /takes no skill, prompt or run/);
+  assert.match(problems([{ id: 'a', output: 'none' }]), /exactly one of skill, prompt or run/);
+  assert.match(problems([{ id: 'a', run: 'echo hi', prompt: 'brief.md', output: 'none' }]), /exactly one of skill, prompt or run/);
+  assert.match(problems([{ id: 'a', run: 'echo hi', output: 'plan' }]), /a runs a command, so its output must be none\./);
+  assert.match(problems([{ id: 'a', run: '  ', output: 'none' }]), /a run must be a command/);
+  assert.deepEqual(problems([{ id: 'a', run: 'echo hi', output: 'none' }]), '');
+  assert.match(problems([{ id: 'a', run: 'echo hi', output: 'none', handoff: '' }]), /a handoff must be a workflow name/);
+  assert.match(problems([{ id: 'a', run: 'echo hi', output: 'none', handoff: 'ghost' }]), /a hands cards to ghost, which is not a workflow/);
   assert.match(problems([{ id: 'a', prompt: 'brief.md', output: 'none' }, { id: 'a', prompt: 'brief.md', output: 'none' }]), /Step id a is used twice/);
   assert.match(problems([{ id: 'a', prompt: 'brief.md', output: 'none', timeoutMinutes: 0 }]), /timeoutMinutes/);
   assert.match(problems([{ id: 'a', prompt: 'brief.md', output: 'none', write: 'yes' }]), /write must be true or false/);

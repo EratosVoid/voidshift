@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import React from 'react';
 import { render } from 'ink-testing-library';
-import { awakeLines, checksLines, checksView, clampFocus, countsLine, Home, homeHints, liveCard, liveCards, memoryLines, nextSection, parkedRows, runnerLines, sectionsFor } from '../src/tui/home.ts';
+import { awakeLines, checksLines, checksView, clampFocus, countsLine, Home, HOME_LIMITS, homeHints, homeLists, liveCard, liveCards, memoryLines, jobRows, nextSection, parkedRows, runnerLines, sectionsFor } from '../src/tui/home.ts';
 import { emptyState, runsThisWeek, updateNotice, type AgentsStatus, type DataState, type RunItem } from '../src/tui/data.ts';
 import { barParts, cycle, editText, fitCell } from '../src/tui/widgets.ts';
 import { duration, minutesText, secondsToNextCheck, truncate } from '../src/tui/format.ts';
@@ -151,9 +151,28 @@ test('parked and interrupted cards are what r can retry', () => {
   assert.match(parkedRows(agents)[0]!.text, /^parked: checks still failed/);
 });
 
+test('failed cards are retryable rows, one per card', () => {
+  const a: AgentsStatus = { ...agents, failed: [{ card: 'ENG-1500', reason: 'process died' }, { card: 'ENG-1407' }] };
+  assert.deepEqual(parkedRows(a).map((p) => [p.card, p.kind]), [['ENG-1407', 'parked'], ['ENG-1500', 'failed'], ['ENG-1399', 'interrupted']]);
+  assert.equal(parkedRows(a)[1]!.text, 'failed: process died');
+});
+
+test('job lines show the last good run, or a yellow failure', () => {
+  const job = { workflow: 'scout', schedule: '0 */6 * * *', task: 't', last: { at: iso(10), outcome: 'verified' }, lastOkAt: iso(10), today: { runs: 3, failed: 0, handed: 2 } };
+  const a: AgentsStatus = { ...agents, jobs: [job, { ...job, workflow: 'sweep', last: { at: iso(5), outcome: 'failed', reason: 'process died' } }] };
+  const rows = jobRows(a);
+  assert.match(rows[0]!.text, /^scout {2}cron 0 \*\/6 \* \* \* {2}last ok \d\d:\d\d · 3 today · 2 handed$/);
+  assert.equal(rows[0]!.bad, false);
+  assert.match(rows[1]!.text, /^! sweep last failed \d\d:\d\d: process died$/);
+  assert.equal(rows[1]!.bad, true);
+  assert.deepEqual(jobRows(agents), []);
+});
+
 test('counts line and weekly run count', () => {
   assert.equal(runsThisWeek(runs, NOW), 1);
   assert.equal(countsLine(agents, runs, NOW), '1 workflow · 2 projects · 1 run this week');
+  const cron: RunItem = { ...runs[0]!, dir: '/r/cron', record: { ...runs[0]!.record!, source: 'cron' } };
+  assert.equal(countsLine(agents, [...runs, cron], NOW), '1 workflow · 2 projects · 1 run this week');
 });
 
 test('awake lines for on, off and held by another tool', () => {
@@ -278,5 +297,41 @@ test('keys: enter opens the focused section, r retries, p and a ask the command'
   await press('\t');
   await press('\r');
   assert.equal(spy.pushed.at(-1)!.id, 'awake');
+  r.unmount();
+});
+
+test('Home shows a few parked cards and jobs, and counts the rest', () => {
+  const job = { workflow: 'scout', schedule: '*/15 * * * *', task: 't', last: { at: iso(10), outcome: 'done' }, lastOkAt: iso(10), today: { runs: 3, failed: 0, handed: 0 } };
+  const many: AgentsStatus = {
+    ...agents,
+    interrupted: [],
+    failed: Array.from({ length: 48 }, (_, i) => ({ card: `ENG-${1000 + i}`, reason: 'process died' })),
+    jobs: Array.from({ length: 5 }, (_, i) => ({ ...job, workflow: `job${i}` })),
+  };
+  const l = homeLists(many);
+  assert.equal(l.parked.length, HOME_LIMITS.attention);
+  assert.equal(l.moreParked, 49 - HOME_LIMITS.attention);
+  assert.equal(l.jobs.length, HOME_LIMITS.jobs);
+  assert.equal(l.moreJobs, 5 - HOME_LIMITS.jobs);
+  assert.deepEqual(homeLists(null), { parked: [], jobs: [], moreParked: 0, moreJobs: 0 });
+});
+
+test('a long list never pushes Memory and Checks off a short terminal', () => {
+  const spy = newSpy();
+  const many: AgentsStatus = { ...agents, failed: Array.from({ length: 48 }, (_, i) => ({ card: `ENG-${1000 + i}`, reason: 'process died' })) };
+  const data = fakeData({
+    ...base,
+    agents: many,
+    tools: ['agents', 'awake', 'memory'],
+    awake: { on: false, sleepDisabledByOther: false, since: null, until: null, minutesLeft: null, batteryFloor: 20, floorApplies: true, power: { onBattery: false, percent: 90 }, watchdog: true, lastReason: null },
+    memory: { vault: '/v', isVault: true, notes: 331, indexed: 330, unindexed: { count: 1, names: [] }, lastUpdated: iso(5), homes: [] },
+    checks: [{ name: 'git', status: 'ok', detail: 'x' }],
+  });
+  const r = render(withFakes(spy, data, React.createElement(Home), { rows: 30 }));
+  const frame = r.lastFrame()!;
+  const lines = frame.split('\n');
+  assert.ok(lines.length <= 27, `Home is ${lines.length} rows tall:\n${frame}`);
+  for (const want of ['Agents', 'more · enter opens Runs', 'Memory', '331 notes · 1 not in INDEX.md', 'Checks', '✓ 1 ok']) assert.ok(frame.includes(want), `missing "${want}" in:\n${frame}`);
+  assert.ok(!frame.includes('ENG-1047'), 'the 48th failed card should be left out');
   r.unmount();
 });

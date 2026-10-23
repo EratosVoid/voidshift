@@ -63,16 +63,21 @@ export function baseChecks(platform: string, nodeVersion: string, exec: Run): Ch
 
   const claude = exec('claude', ['--version']);
   const codex = exec('codex', ['--version']);
-  checks.push(
-    claude.ok
-      ? { name: 'Claude Code', status: 'ok', detail: firstLine(claude.stdout) }
-      : { name: 'Claude Code', status: 'warn', detail: 'not found', fix: 'https://docs.claude.com/en/docs/claude-code' },
-  );
-  checks.push(
-    codex.ok
-      ? { name: 'Codex CLI', status: 'ok', detail: firstLine(codex.stdout) }
-      : { name: 'Codex CLI', status: 'warn', detail: 'not found', fix: 'npm i -g @openai/codex' },
-  );
+  // One agent CLI is enough: the other is only checked when neither exists.
+  if (claude.ok || !codex.ok) {
+    checks.push(
+      claude.ok
+        ? { name: 'Claude Code', status: 'ok', detail: firstLine(claude.stdout) }
+        : { name: 'Claude Code', status: 'warn', detail: 'not found', fix: 'https://docs.claude.com/en/docs/claude-code' },
+    );
+  }
+  if (codex.ok || !claude.ok) {
+    checks.push(
+      codex.ok
+        ? { name: 'Codex CLI', status: 'ok', detail: firstLine(codex.stdout) }
+        : { name: 'Codex CLI', status: 'warn', detail: 'not found', fix: 'npm i -g @openai/codex' },
+    );
+  }
   if (!claude.ok && !codex.ok) {
     checks.push({ name: 'Agent', status: 'fail', detail: 'neither Claude Code nor Codex is installed', fix: 'Install at least one' });
   }
