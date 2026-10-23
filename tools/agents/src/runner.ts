@@ -25,6 +25,7 @@ import { commitsAhead, enforceCommitPolicy, defaultBranch, ensureDraftPr, ensure
 import type { Card } from './linear.ts';
 import { noTracker, type Tracker, type Trackers } from './tracker.ts';
 import { recall, syncMemory, vaultPath } from './memory.ts';
+import type { RunEvent, RunKind } from './notify.ts';
 import { claudeSettingsFile, readRules, rulesSection } from './profile.ts';
 import { acquireWorkspace, clearCurrent, heldByOther, isPaused, liveRuns, readCurrent, readPending, releaseWorkspace, writeCurrent, writePending, writeRun, writeWorkspace, readCronState, writeCronState, type Pending, type RunRecord, type StepRecord } from './state.ts';
 
@@ -39,6 +40,10 @@ export interface RunContext {
   log: (line: string) => void;
   // How to run this CLI again, for `vsf memory recall`.
   selfCommand: string[];
+  // Pings how a card run ended, and sends the daily summary. Both must log
+  // their own failures; a throw is logged and never changes the outcome.
+  notify?: (event: RunEvent) => Promise<void>;
+  summary?: (paused: boolean) => Promise<void>;
 }
 
 function withLabels(card: Card, drop: (l: string) => boolean, add: string[]): string[] {
@@ -144,7 +149,16 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
     planToPost = null;
   };
 
-  async function park(reason: string): Promise<'parked'> {
+  const ping = async (kind: RunKind, reason?: string) => {
+    if (!rc.notify) return;
+    try {
+      await rc.notify({ kind, card: card.identifier, title: card.title, workflow: workflowName, url: card.url || undefined, prUrl: record.prUrl, reason });
+    } catch (err) {
+      say(`discord: ${(err as Error).message}`);
+    }
+  };
+
+  async function park(reason: string, kind: 'parked' | 'failed' = 'parked'): Promise<'parked'> {
     say(`parked: ${reason}`);
     const comment = `**Parked:** ${reason}${lastFindings ? `\n\n${lastFindings}` : ''}\n\nFix the cause, then add \`${label}\` again to retry.`;
     const add = labelsOn ? [LABELS.parked, ...(loops ? [LABELS.version(loops)] : [])] : [];
@@ -155,12 +169,15 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
       commented = true;
       await endLabels(LABELS.parked, loops || undefined);
     } catch (err) {
-      if (!isCardTrigger(trigger)) return done('parked', reason);
-      say(`could not reach ${trigger.source === 'voidtrack' ? 'VoidTrack' : 'Linear'} to park it (${(err as Error).message}). Will retry next minute.`);
-      // An empty comment is skipped on retry, so it is not posted twice.
-      writePending(rc.configDir, [...readPending(rc.configDir), { card: card.identifier, comment: commented ? '' : comment, drop: [label], add, dropStatus: labelsOn, source: trigger.source }]);
+      if (isCardTrigger(trigger)) {
+        say(`could not reach ${trigger.source === 'voidtrack' ? 'VoidTrack' : 'Linear'} to park it (${(err as Error).message}). Will retry next minute.`);
+        // An empty comment is skipped on retry, so it is not posted twice.
+        writePending(rc.configDir, [...readPending(rc.configDir), { card: card.identifier, comment: commented ? '' : comment, drop: [label], add, dropStatus: labelsOn, source: trigger.source }]);
+      }
     }
-    return done('parked', reason);
+    const outcome = done('parked', reason);
+    await ping(kind, reason);
+    return outcome;
   }
 
   try {
@@ -354,16 +371,19 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
       await linear.comment(card, `**All checks passed.**${prUrl ? ` PR ready: ${prUrl}` : ''}${!moved ? `\n\n(No "${state}" state on this team, so the card was not moved.)` : ''}`);
     }
     say('verified');
-    return done('verified');
+    done('verified');
   } catch (err) {
     if (err instanceof Park) return park(err.message);
-    return park(`Something went wrong: ${(err as Error).message}`);
+    return park(`Something went wrong: ${(err as Error).message}`, 'failed');
   } finally {
     active = null;
     // Share whatever notes the agents wrote, whatever the outcome.
     const shared = syncMemory(rc.selfCommand, rc.configDir);
     if (shared) say(shared);
   }
+  // Outside the try, so a ping that throws can never park a verified run.
+  await ping(record.prUrl ? 'ready' : 'passed');
+  return 'verified';
 }
 
 type Job = { card: Card; trigger: Trigger; workflow: string; workspace: string };
@@ -692,7 +712,15 @@ export async function dispatch(rc: RunContext, over: Partial<DispatchDeps> = {})
     for (;;) {
       if (deps.reload) rc = { ...rc, config: deps.reload() };
       await flushPending(rc);
-      if (!isPaused(rc.configDir)) {
+      const paused = isPaused(rc.configDir);
+      if (rc.summary) {
+        try {
+          await rc.summary(paused);
+        } catch (err) {
+          rc.log(`discord: ${(err as Error).message}`);
+        }
+      }
+      if (!paused) {
         const busy = new Set([...children.keys(), ...liveRuns(rc.configDir).map((c) => workspaceOf(c))]);
         const skip = new Set([...started].filter(([, at]) => Date.now() - at < deps.waitMs).map(([id]) => id));
         for (const job of await findJobs(rc, { busy, skip })) {

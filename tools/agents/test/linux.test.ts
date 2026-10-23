@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { chmodSync, mkdtempSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { keyStore, readSecret, readSecretsFile, secretsPath, storeSecret, writeSecretsFile } from '../src/secrets.ts';
+import { keyStore, readSecret, readSecretsFile, removeSecret, secretsPath, storeSecret, writeSecretsFile } from '../src/secrets.ts';
 import { parseExecStart, quote, serviceUnit, timerUnit, unquote } from '../src/systemd.ts';
 
 const scratch = () => mkdtempSync(join(tmpdir(), 'vsf-linux-'));
@@ -47,4 +47,14 @@ test('on Linux keys go to the secrets file, merged with what is there', () => {
   assert.deepEqual(Object.keys(JSON.parse(readFileSync(secretsPath(dir), 'utf8'))), ['linear', 'discord']);
   assert.equal(storeSecret(dir, 'linear', 'has space', 'linux'), false);
   assert.equal(keyStore('linux'), 'a file only you can read');
+});
+
+test('a name with digits is stored, and removeSecret drops only its own key', () => {
+  const dir = scratch();
+  assert.ok(storeSecret(dir, 'linear', 'lin_api_abc', 'linux'));
+  assert.ok(storeSecret(dir, 'discord-build-2', 'https://discord.com/api/webhooks/1/x', 'linux'));
+  assert.equal(readSecret(dir, 'discord-build-2', 'linux'), 'https://discord.com/api/webhooks/1/x');
+  assert.ok(removeSecret(dir, 'discord-build-2', 'linux'));
+  assert.deepEqual(readSecretsFile(secretsPath(dir)), { linear: 'lin_api_abc' });
+  assert.equal(statSync(secretsPath(dir)).mode & 0o777, 0o600);
 });

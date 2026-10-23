@@ -10,6 +10,7 @@ import type { Card } from './linear.ts';
 import { parseFrom, resolveName, stepNames } from './names.ts';
 import { isStatusLabel } from './workflow.ts';
 import { cancelCard, dispatch, tick } from './runner.ts';
+import { notifyRun, notifyRunner, sendSummary, type RunEvent } from './notify.ts';
 import type { Check, ToolCommand, ToolContext } from './types.ts';
 
 const HOUR = 3_600_000;
@@ -263,6 +264,13 @@ export async function trackerWarnings(kinds: Kind[], trackers: Trackers): Promis
   return out;
 }
 
+// Pauses or resumes the runner, and pings Discord only when that changed something.
+export async function changePaused(ctx: Pick<ToolContext, 'configDir' | 'log'>, paused: boolean, reason: string, fetcher: typeof fetch = fetch, platform: NodeJS.Platform = process.platform): Promise<void> {
+  const was = isPaused(ctx.configDir);
+  setPaused(ctx.configDir, paused);
+  if (was !== paused) await notifyRunner(ctx.configDir, paused, reason, ctx.log, fetcher, platform);
+}
+
 async function startCmd(ctx: ToolContext): Promise<number> {
   if (!Object.keys(readAgentsConfig(ctx.configDir).workflows).length) {
     ctx.log('No workflows yet. Create one first: vsf agents workflow add.');
@@ -271,7 +279,7 @@ async function startCmd(ctx: ToolContext): Promise<number> {
   for (const w of await trackerWarnings(trackersInUse(readAgentsConfig(ctx.configDir)), trackersFor(ctx.configDir))) {
     ctx.log(`Warning: ${w.message.replace(/\.?$/, '.')} Workflows on ${TRACKERS[w.kind].name} are skipped until then.`);
   }
-  setPaused(ctx.configDir, false);
+  await changePaused(ctx, false, 'by vsf agents start');
   if (!runnerService().start(ctx.home, program(ctx), logPath(ctx.configDir))) {
     ctx.log('Could not start the runner. Check vsf agents logs.');
     return 1;
@@ -371,7 +379,7 @@ const restart = guard(async (args, ctx) => {
 const pause = guard(async (args, ctx) => {
   const p = parse('pause', args, {}, ctx);
   if (typeof p === 'number') return p;
-  setPaused(ctx.configDir, true);
+  await changePaused(ctx, true, 'by vsf agents pause');
   ctx.log('Paused. The runner picks up no new cards; a card in progress carries on. vsf agents resume to continue.');
   return 0;
 });
@@ -379,7 +387,7 @@ const pause = guard(async (args, ctx) => {
 const resume = guard(async (args, ctx) => {
   const p = parse('resume', args, {}, ctx);
   if (typeof p === 'number') return p;
-  setPaused(ctx.configDir, false);
+  await changePaused(ctx, false, 'by vsf agents resume');
   ctx.log('Resumed.');
   return 0;
 });
@@ -699,7 +707,11 @@ const tickCmd: ToolCommand = async (args, ctx) => {
   try {
     const { values } = parseArgs({ args, options: { card: { type: 'string' }, workflow: { type: 'string' }, schedule: { type: 'string' } }, strict: true });
     const config = readAgentsConfig(ctx.configDir);
-    const rc = { configDir: ctx.configDir, config, trackers: trackersFor(ctx.configDir), log: stamped, selfCommand: ctx.selfCommand };
+    const rc = {
+      configDir: ctx.configDir, config, trackers: trackersFor(ctx.configDir), log: stamped, selfCommand: ctx.selfCommand,
+      notify: (e: RunEvent) => notifyRun(ctx.configDir, e, stamped),
+      summary: (paused: boolean) => sendSummary(ctx.configDir, paused, stamped),
+    };
     if (values.card || values.workflow) return await tick(rc, values.card?.toUpperCase(), { workflow: values.workflow, schedule: values.schedule, child: true });
     return await dispatch(rc, { reload: () => readAgentsConfig(ctx.configDir) });
   } catch (err) {

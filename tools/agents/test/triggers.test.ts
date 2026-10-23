@@ -397,3 +397,15 @@ test('a broken profile settings file parks the run with a clear reason', async (
   assert.equal(await runCard(cronCard('nightly', 'Tidy up', new Date()), wf.triggers[0]!, 'nightly', wf, rc.config.projects.p, rc), 'parked');
   assert.ok(logs.some((l) => /parked: Your agent profile's Claude settings are broken/.test(l)), logs.join('\n'));
 });
+
+test('a verified run with a PR pings ready once, and a throwing ping leaves it verified', async () => {
+  const rig = agentRig(`${COMMIT}echo "RESULT: DONE"\n`);
+  const { rc, logs, run } = cardRig(rig, { triggers: [vtTrigger], steps: ['vs-dev'], maxRounds: 1, project: 'p' }, [{ body: '## Plan\n\nDo it.', createdAt: '2026-10-23T00:00:00Z' }]);
+  const kinds: string[] = [];
+  rc.notify = async (e) => void kinds.push(`${e.kind} ${e.prUrl}`);
+  assert.equal(await run(), 'verified', logs.join('\n'));
+  assert.deepEqual(kinds, ['ready https://github.com/x/y/pull/1']);
+  rc.notify = async () => { throw new Error('webhook down'); };
+  assert.equal(await run(), 'verified', logs.join('\n'));
+  assert.ok(logs.some((l) => /discord: webhook down/.test(l)), logs.join('\n'));
+});

@@ -307,3 +307,28 @@ test('an unexpected error is logged as one line and returns 1', async () => {
   assert.equal(code, 1);
   assert.ok(logs.every((l) => !l.includes('\n    at ')));
 });
+
+test('a parked run and an unexpected error each ping once, as parked and failed', async () => {
+  const kinds: string[] = [];
+  const { rc } = setup({ comments: async () => { throw new Error('stop'); }, comment: async () => {}, setLabels: async () => {} });
+  rc.notify = async (e) => void kinds.push(`${e.kind} ${e.card} ${e.workflow} ${e.reason}`);
+  rc.config.projects.p = { path: '/nonexistent' };
+  assert.equal(await runCard(card(['a']), wf('a').triggers[0]!, 'one', wf('a'), rc.config.projects.p, rc), 'parked');
+  const repo = mkdtempSync(join(tmpdir(), 'vsf-repo-'));
+  mkdirSync(join(repo, '.git'));
+  rc.config.projects.p = { path: repo };
+  assert.equal(await runCard(card(['a']), wf('a').triggers[0]!, 'one', wf('a'), rc.config.projects.p, rc), 'parked');
+  assert.deepEqual(kinds, ['parked ENG-1 one The project folder /nonexistent is not a git repository on this Mac.', 'failed ENG-1 one Something went wrong: stop']);
+});
+
+test('the dispatcher asks for the summary on every pass, paused or not', async () => {
+  const { rc } = setup({});
+  const seen: boolean[] = [];
+  rc.summary = async (paused) => void seen.push(paused);
+  setPaused(rc.configDir, true);
+  assert.equal(await dispatch(rc, fakeStarts([])), 0);
+  rc.summary = async () => { throw new Error('boom'); };
+  setPaused(rc.configDir, false);
+  assert.equal(await dispatch(rc, fakeStarts([])), 0);
+  assert.deepEqual(seen, [true]);
+});

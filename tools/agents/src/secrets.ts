@@ -48,7 +48,7 @@ export function readSecret(configDir: string, name: string, platform: NodeJS.Pla
 }
 
 export function storeSecret(configDir: string, name: string, value: string, platform: NodeJS.Platform = process.platform): boolean {
-  if (!SAFE_VALUE.test(value) || !/^[a-z-]+$/.test(name)) return false;
+  if (!SAFE_VALUE.test(value) || !/^[a-z0-9-]+$/.test(name)) return false;
   if (platform === 'darwin') {
     // On stdin through `security -i`, so the value never appears in a process list.
     const command = `add-generic-password -U -s ${service(name)} -a ${userInfo().username} -w ${value}\n`;
@@ -56,6 +56,18 @@ export function storeSecret(configDir: string, name: string, value: string, plat
   }
   const path = secretsPath(configDir);
   writeSecretsFile(path, { ...readSecretsFile(path), [name]: value });
+  return true;
+}
+
+export function removeSecret(configDir: string, name: string, platform: NodeJS.Platform = process.platform): boolean {
+  if (platform === 'darwin') {
+    // 44 is the Keychain's "not found": already gone counts as removed.
+    const status = spawnSync('/usr/bin/security', ['delete-generic-password', '-s', service(name)], { encoding: 'utf8' }).status;
+    return status === 0 || status === 44;
+  }
+  const path = secretsPath(configDir);
+  const { [name]: _gone, ...rest } = readSecretsFile(path);
+  writeSecretsFile(path, rest);
   return true;
 }
 
