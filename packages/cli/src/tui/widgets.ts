@@ -20,6 +20,8 @@ export interface PanelProps {
   width?: number | string;
   height?: number;
   flexGrow?: number;
+  // A panel that may shrink clips what does not fit instead of pushing the rest down.
+  flexShrink?: number;
   // Shown dim after the title.
   subtitle?: string;
   children?: React.ReactNode;
@@ -48,10 +50,10 @@ export function Panel(props: PanelProps): React.ReactElement {
   );
   const body = h(
     Box,
-    { flexDirection: 'column', borderStyle: 'round', borderTop: false, borderColor: colour, paddingX: 1, flexGrow: 1 },
+    { flexDirection: 'column', borderStyle: 'round', borderTop: false, borderColor: colour, paddingX: 1, flexGrow: 1, flexShrink: 1, overflow: 'hidden' },
     props.children,
   );
-  return h(Box, { flexDirection: 'column', width: props.width, height: props.height, flexGrow: props.flexGrow }, top, body);
+  return h(Box, { flexDirection: 'column', width: props.width, height: props.height, flexGrow: props.flexGrow, flexShrink: props.flexShrink ?? 0, overflow: 'hidden' }, top, body);
 }
 
 // ---- Rich lines: a line is a list of coloured segments --------------------

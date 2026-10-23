@@ -177,6 +177,28 @@ export function jobRows(agents: AgentsStatus): JobRow[] {
   });
 }
 
+// How many rows Home shows of each list; the rest are one "+N more" line away.
+export const HOME_LIMITS = { attention: 4, jobs: 3 };
+
+export interface HomeLists {
+  parked: ParkedRow[];
+  jobs: JobRow[];
+  moreParked: number;
+  moreJobs: number;
+}
+
+// The parked and failed cards and the jobs Home shows, capped, and how many are left out.
+export function homeLists(agents: AgentsStatus | null | undefined): HomeLists {
+  const parked = agents ? parkedRows(agents) : [];
+  const jobs = agents ? jobRows(agents) : [];
+  return {
+    parked: parked.slice(0, HOME_LIMITS.attention),
+    jobs: jobs.slice(0, HOME_LIMITS.jobs),
+    moreParked: Math.max(0, parked.length - HOME_LIMITS.attention),
+    moreJobs: Math.max(0, jobs.length - HOME_LIMITS.jobs),
+  };
+}
+
 export function countsLine(agents: AgentsStatus, runs: RunItem[], nowMs: number): string {
   return [plural(agents.workflows, 'workflow'), plural(agents.projects, 'project'), plural(runsThisWeek(runs.filter((r) => r.record?.source !== 'cron'), nowMs), 'run') + ' this week'].join(' · ');
 }
@@ -292,8 +314,7 @@ export function Home(): React.ReactElement {
 
   const at = clampFocus(sections, focus);
   const agents = state.agents;
-  const parked = agents ? parkedRows(agents) : [];
-  const jobs = agents ? jobRows(agents) : [];
+  const { parked, jobs } = homeLists(agents);
   // Parked rows first, then job lines, in one selectable list.
   const total = parked.length + jobs.length;
   const sel = Math.min(parkedIdx, Math.max(0, total - 1));
@@ -353,6 +374,7 @@ export function Home(): React.ReactElement {
   });
 
   const panels: React.ReactNode[] = [];
+  // The Agents panel takes the height left over and clips; the rest keep theirs.
   if (sections.includes('agents')) panels.push(h(AgentsPanel, { key: 'agents', focused: at === 'agents', selected: sel, now }));
   const lower: React.ReactNode[] = [];
   // Whole-number widths: halves of an odd width would misalign the borders.
@@ -379,10 +401,11 @@ export function Home(): React.ReactElement {
         ),
       ),
     );
-  if (lower.length) panels.push(h(Box, { key: 'lower', flexDirection: 'row' }, ...lower));
+  if (lower.length) panels.push(h(Box, { key: 'lower', flexDirection: 'row', flexShrink: 0 }, ...lower));
   panels.push(h(ChecksPanel, { key: 'checks', focused: at === 'checks' }));
   if (!state.tools.length && state.loaded) panels.unshift(h(Text, { key: 'none', color: theme.dim }, ' No tools added yet. Run vsf setup in a terminal to pick some.'));
-  return h(Box, { flexDirection: 'column' }, ...panels);
+  // Header, toast and key hints take three rows.
+  return h(Box, { flexDirection: 'column', height: Math.max(12, ctx.rows - 3), overflow: 'hidden' }, ...panels);
 }
 
 const toolState = (error: string | undefined) => h(Text, { color: error ? theme.yellow : theme.dim, wrap: 'truncate-end' }, error ?? 'Loading...');
@@ -391,11 +414,11 @@ function AgentsPanel(props: { focused: boolean; selected: number; now: number })
   const { state } = useData();
   const agents = state.agents;
   if (!agents) return h(Panel, { title: 'Agents', focused: props.focused }, toolState(state.errors.agents));
+  const fit = { flexGrow: 1, flexShrink: 1 };
 
   const run = runnerLines(agents, props.now);
   const lives = liveCards(state, props.now);
-  const parked = parkedRows(agents);
-  const jobs = jobRows(agents);
+  const { parked, jobs, moreParked, moreJobs } = homeLists(agents);
   const rows: React.ReactNode[] = [h(SplitRow, { key: 'runner', left: run.left, right: run.right })];
 
   for (const live of lives) {
@@ -438,6 +461,7 @@ function AgentsPanel(props: { focused: boolean; selected: number; now: number })
         }),
       );
     });
+    if (moreParked) rows.push(h(Text, { key: 'moreParked', color: theme.dim }, `  +${moreParked} more · enter opens Runs`));
   }
   if (jobs.length) {
     rows.push(h(Text, { key: 'g2j' }, ' '));
@@ -451,13 +475,14 @@ function AgentsPanel(props: { focused: boolean; selected: number; now: number })
         }),
       );
     });
+    if (moreJobs) rows.push(h(Text, { key: 'moreJobs', color: theme.dim }, `  +${moreJobs} more ${moreJobs === 1 ? 'job' : 'jobs'} · vsf agents status lists them`));
   }
   rows.push(h(Text, { key: 'g3' }, ' '));
   rows.push(h(Text, { key: 'counts', color: theme.dim }, countsLine(agents, state.runs, props.now)));
   for (const key of ['agents.runs', 'agents']) {
     if (state.errors[key]) rows.push(h(Text, { key: `e${key}`, color: theme.yellow, wrap: 'truncate-end' }, `! ${state.errors[key]}`));
   }
-  return h(Panel, { title: 'Agents', focused: props.focused }, ...rows);
+  return h(Panel, { title: 'Agents', focused: props.focused, ...fit }, ...rows);
 }
 
 function ChecksPanel(props: { focused: boolean }): React.ReactElement {
