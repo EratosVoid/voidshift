@@ -214,6 +214,15 @@ test('a schedule whose workspace is busy waits and is not marked as fired', asyn
   }
 });
 
+test('a run for one schedule takes that schedule, not a labelled card in the same workflow', async () => {
+  const { rc } = setup({ myCardsWithLabel: async () => [card(['a'])] }, { mixed: { ...wf('a'), triggers: [{ source: 'linear', team: 'ENG', label: 'a' }, { source: 'cron', schedule: '* * * * *', task: 'Tidy' }] } });
+  rc.config.projects.p = { path: '/p' };
+  assert.equal((await findJobs(rc, { workflow: 'mixed' }))[0]?.card.identifier, 'ENG-1');
+  const jobs = await findJobs(rc, { workflow: 'mixed', schedule: '* * * * *', force: true });
+  assert.equal(jobs.length, 1);
+  assert.equal(jobs[0]!.trigger.source, 'cron');
+});
+
 test('a card matched by its tracker project runs in that project, ahead of the workflow default', async () => {
   const { rc, configDir } = setup({ myCardsWithLabel: async () => [card(['a'], 'ENG', 'ENG-1', 'Beta Ltd')] }, { one: { ...wf('a'), project: 'a' } });
   twoWorkspaces(rc, configDir);

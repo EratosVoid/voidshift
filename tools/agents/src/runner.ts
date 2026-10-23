@@ -461,6 +461,8 @@ export async function findJobs(rc: RunContext, q: JobQuery = {}): Promise<Job[]>
           if (take({ card, trigger, workflow: name }, workspace)) return out;
           continue;
         }
+        // A run for one schedule takes no labelled cards.
+        if (q.schedule) continue;
         // A pinned card may have lost its label (a parked card re-run by hand), so match by team.
         if (pinned) {
           if (pinned.source === trigger.source && pinned.card.teamKey === trigger.team) {
