@@ -178,6 +178,7 @@ export function validateConfig(value: unknown, saved?: Pick<AgentsConfig, 'proje
     else if (saved?.projects?.[name]?.path !== p.path && !existsSync(join(p.path, '.git'))) problems.push(`Project ${name}: ${p.path} is not a git repository.`);
   }
   if (!Array.isArray(value.enabled) || value.enabled.some((a) => typeof a !== 'string' || !(a in AGENTS))) problems.push(`enabled must list agents from: ${Object.keys(AGENTS).join(', ')}.`);
+  if (value.commits !== undefined && (!isObj(value.commits) || Object.entries(value.commits).some(([k, v]) => !['signOff', 'dropAiTrailers'].includes(k) || typeof v !== 'boolean'))) problems.push('commits may only set signOff and dropAiTrailers, each true or false.');
   if (!Array.isArray(value.homes) || value.homes.some((h) => !isObj(h) || (h.kind !== 'claude' && h.kind !== 'codex') || typeof h.dir !== 'string')) problems.push('homes must be a list of { kind: claude or codex, dir }.');
   if (!isObj(value.workflows)) problems.push('workflows must be an object.');
   else {

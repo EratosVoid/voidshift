@@ -12,6 +12,7 @@ import { createVoidTrack } from './voidtrack.ts';
 import { parseCron } from './cron.ts';
 import { trackersInUse } from './control.ts';
 import { runnerService } from './service.ts';
+import { initProfile, profileChecks, profileDir, readRules, renderClaudeSettings, CLAUDE_SETTINGS, RULES_FILE } from './profile.ts';
 import { createLinear } from './linear.ts';
 import { TRIGGER_FORMS, duplicateTriggerWarnings, moveKey, parseTrigger, renameKey, sameTrigger, validateAgentFolder, validateConfig, validateWorkflow, workflowsUsing, type Place } from './manage.ts';
 import { parseStep, resolveName, stepNames } from './names.ts';
@@ -418,6 +419,7 @@ const USAGE: [string, string][] = [
   ['link DIR [--claude | --codex]', 'Link the agents into a config folder'],
   ['unlink DIR', 'Remove the agents from a config folder'],
   ['key [--voidtrack]', 'Store or replace the Linear or VoidTrack API key (reads stdin without a terminal)'],
+  ['profile [init]', `Your profile: rules (${RULES_FILE}) and Claude settings (${CLAUDE_SETTINGS}) every agent run carries; init creates it`],
   ['validate [DIR]', `Check an agent folder (DIR/${AGENT_FILE} and its prompts), or the config and every folder under agents/defs`],
   ['help [COMMAND]', 'Show this list, or one command'],
 ];
@@ -1099,6 +1101,12 @@ const agents: Tool = {
     }
     config.engine = engine;
 
+    // What the runner does to agent commits before pushing them.
+    const commits = config.commits ?? {};
+    commits.dropAiTrailers = await ui.confirm('Remove AI co-author lines from agent commits?', commits.dropAiTrailers ?? true);
+    commits.signOff = await ui.confirm('Sign off agent commits (Signed-off-by, for repos that ask for a DCO)?', commits.signOff ?? false);
+    config.commits = commits;
+
     const name = await currentLinearUser(ctx.configDir);
     if (!name || !(await ui.confirm(`Keep using Linear as ${name}?`))) {
       if (!(await setupKey(ui, ctx.configDir))) throw new Error('Linear is not connected. Run vsf setup agents to retry.');
@@ -1168,7 +1176,7 @@ const agents: Tool = {
           : { name: 'agent folders', status: 'ok', detail: `${folders.length} valid` },
       );
     }
-    return [...checks, ...(await controlChecks(ctx))];
+    return [...checks, ...profileChecks(ctx.configDir), ...(await controlChecks(ctx))];
   },
 
   commands: {
@@ -1192,6 +1200,34 @@ const agents: Tool = {
     },
 
     workflow: (args, ctx) => group('workflow', workflowSubs, args, ctx),
+
+    async profile(args, ctx) {
+      const p = begin('profile', args, {}, ctx);
+      if (typeof p === 'number') return p;
+      const dir = profileDir(ctx.configDir);
+      if (p.positionals[0] === 'init') {
+        const made = initProfile(ctx.configDir);
+        ctx.log(made.length ? `Created ${made.join(', ')} in ${tilde(dir)}.` : `${tilde(dir)} already exists; nothing changed.`);
+        return 0;
+      }
+      if (p.positionals.length) {
+        ctx.log(usageOf('profile'));
+        return 2;
+      }
+      ctx.log(`Profile: ${tilde(dir)}${existsSync(dir) ? '' : ' (not created yet: vsf agents profile init)'}`);
+      const rules = readRules(ctx.configDir).replace(/<!--[\s\S]*?-->/g, '').trim();
+      ctx.log(`Rules: ${rules ? `${rules.split('\n').length} lines in ${RULES_FILE}, added to every step's prompt` : 'none'}`);
+      let settings = 'none';
+      try {
+        settings = renderClaudeSettings(ctx.configDir) === null ? 'none' : `${CLAUDE_SETTINGS}, passed to every Claude run`;
+      } catch (err) {
+        settings = `broken: ${(err as Error).message}`;
+      }
+      ctx.log(`Claude settings: ${settings}`);
+      const c = readAgentsConfig(ctx.configDir).commits ?? {};
+      ctx.log(`Commits: ${[c.dropAiTrailers ? 'AI co-author lines removed' : 'AI lines kept', c.signOff ? 'signed off' : 'not signed off'].join(', ')} (commits in the agents config)`);
+      return 0;
+    },
 
     async validate(args, ctx) {
       const p = begin('validate', args, {}, ctx);

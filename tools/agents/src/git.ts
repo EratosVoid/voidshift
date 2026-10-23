@@ -149,3 +149,68 @@ export function resetWorktree(worktree: string): void {
   sh('git', ['reset', '--hard', 'HEAD'], worktree);
   sh('git', ['clean', '-fd'], worktree);
 }
+
+// What the runner does to an agent's new commits before they are pushed.
+export interface CommitPolicy {
+  // Add Signed-off-by for the git user, as a DCO asks.
+  signOff?: boolean;
+  // Drop co-author and "generated with" lines naming an AI tool.
+  dropAiTrailers?: boolean;
+}
+
+const AI_LINE = /^(co-authored-by:.*(claude|anthropic|codex|openai|copilot|gemini|cursor)|.*generated with \[?(claude|codex)).*$/i;
+
+// The message with AI lines removed and a sign-off added, as the policy asks.
+export function applyPolicy(message: string, policy: CommitPolicy, signer: string | null, cwd: string): string {
+  let msg = message.replace(/\r\n/g, '\n');
+  if (policy.dropAiTrailers) msg = msg.split('\n').filter((l) => !AI_LINE.test(l.trim())).join('\n');
+  msg = msg.replace(/\s+$/, '') + '\n';
+  if (policy.signOff && signer) {
+    // git's own trailer rules decide the blank line and skip a duplicate.
+    const r = spawnSync('git', ['interpret-trailers', '--if-exists', 'addIfDifferent', '--trailer', `Signed-off-by: ${signer}`], { cwd, input: msg, encoding: 'utf8' });
+    if (r.status === 0) msg = r.stdout;
+  }
+  return msg;
+}
+
+// Rewrites the commits after `from` up to HEAD so their messages follow the
+// policy. Trees, authors and dates stay as they were; only commits not yet
+// pushed may be passed. Returns how many changed.
+export function enforceCommitPolicy(worktree: string, from: string, policy: CommitPolicy): number {
+  if (!policy.signOff && !policy.dropAiTrailers) return 0;
+  const name = sh('git', ['config', 'user.name'], worktree).stdout;
+  const email = sh('git', ['config', 'user.email'], worktree).stdout;
+  const signer = name && email ? `${name} <${email}>` : null;
+  const list = sh('git', ['rev-list', '--reverse', '--parents', `${from}..HEAD`], worktree);
+  if (!list.ok || !list.stdout) return 0;
+  const map = new Map<string, string>();
+  let changed = 0;
+  let head = '';
+  for (const line of list.stdout.split('\n')) {
+    const [sha, ...parents] = line.split(' ');
+    const info = must(sh('git', ['log', '-1', '--format=%T%x00%an%x00%ae%x00%aD%x00%cn%x00%ce%x00%cD', sha!], worktree), 'git log');
+    const [tree, an, ae, ad, cn, ce, cd] = info.split('\0');
+    const raw = spawnSync('git', ['log', '-1', '--format=%B', sha!], { cwd: worktree, encoding: 'utf8' }).stdout ?? '';
+    const message = applyPolicy(raw, policy, signer, worktree);
+    const newParents = parents.map((p) => map.get(p) ?? p);
+    if (message === raw.replace(/\s+$/, '') + '\n' && newParents.every((p, i) => p === parents[i])) {
+      map.set(sha!, sha!);
+      head = sha!;
+      continue;
+    }
+    const r = spawnSync('git', ['commit-tree', tree!, ...newParents.flatMap((p) => ['-p', p]), '-F', '-'], {
+      cwd: worktree,
+      input: message,
+      encoding: 'utf8',
+      env: { ...process.env, GIT_AUTHOR_NAME: an, GIT_AUTHOR_EMAIL: ae, GIT_AUTHOR_DATE: ad, GIT_COMMITTER_NAME: cn, GIT_COMMITTER_EMAIL: ce, GIT_COMMITTER_DATE: cd },
+    });
+    if (r.status !== 0) throw new Error(`git commit-tree failed: ${r.stderr}`);
+    const next = r.stdout.trim();
+    map.set(sha!, next);
+    head = next;
+    changed++;
+  }
+  // Same tree at the tip, so moving the branch leaves the files untouched.
+  if (changed) must(sh('git', ['reset', '-q', '--soft', head], worktree), 'git reset');
+  return changed;
+}

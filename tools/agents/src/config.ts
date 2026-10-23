@@ -136,6 +136,8 @@ export interface AgentsConfig {
   homes: { kind: 'claude' | 'codex'; dir: string }[];
   // Agents switched on; empty until setup has asked.
   enabled: string[];
+  // What the runner does to agent commits before pushing them.
+  commits?: { signOff?: boolean; dropAiTrailers?: boolean };
   // Workflows read from agent folders, by name, to their folder. Never saved.
   folders?: Record<string, string>;
 }
