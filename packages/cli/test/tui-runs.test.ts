@@ -195,7 +195,8 @@ test('Runs renders the table, the detail and the labels', async () => {
   r.record!.prUrl = 'https://github.com/o/r/pull/1502';
   const data = fakeData({ runs: [r, run('ENG-1399')], agents: agents('ENG-1412'), workflows: [{ name: 'tether-relay-build', triggers: [], steps: ['vs-dev', 'vs-qa'], maxRounds: 3, project: 'p' }] });
   const ui = render(withFakes(spy, data, React.createElement(Runs, { params: {} }), { columns: 110, rows: 40 }));
-  await tick(50);
+  // The labels arrive after a debounce, later on a slow machine.
+  for (let i = 0; i < 40 && !/labels vs-working/.test(ui.lastFrame() ?? ''); i++) await tick(50);
   const f = ui.lastFrame() ?? '';
   assert.match(f, /Runs, newest first/);
   assert.match(f, /ENG-1412/);
