@@ -155,6 +155,10 @@ export interface AgentsConfig {
   enabled: string[];
   // What the runner does to agent commits before pushing them.
   commits?: { signOff?: boolean; dropAiTrailers?: boolean };
+  // Most card runs at once over every workspace; 0 means no cap.
+  maxRuns?: number;
+  // Percent of the Claude 5 hour window at which no new run starts; 0 never holds.
+  pauseAt?: number;
   // Workflows read from agent folders, by name, to their folder. Never saved.
   folders?: Record<string, string>;
 }
@@ -176,6 +180,8 @@ export const DEFAULTS: AgentsConfig = {
   timeoutMinutes: 45,
   homes: [],
   enabled: [],
+  maxRuns: 0,
+  pauseAt: 90,
 };
 
 export const agentsDir = (configDir: string) => join(configDir, 'agents');

@@ -40,6 +40,17 @@ export function minutesText(min: number): string {
   return `${Math.floor(min / 60)}h ${Math.round(min % 60)}m`;
 }
 
+// "12.3k in, 4.1k out, $0.42 est." for a step, empty with nothing recorded.
+export function usageText(u: { input?: number; output?: number; costUsd?: number } | undefined): string {
+  if (!u) return '';
+  const n = (v: number) => (v >= 1e6 ? `${(v / 1e6).toFixed(1)}M` : v >= 1e3 ? `${(v / 1e3).toFixed(1)}k` : String(v));
+  const parts: string[] = [];
+  if (u.input !== undefined) parts.push(`${n(u.input)} in`);
+  if (u.output !== undefined) parts.push(`${n(u.output)} out`);
+  if (u.costUsd !== undefined) parts.push(`$${u.costUsd.toFixed(2)} est.`);
+  return parts.join(', ');
+}
+
 export const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' : 's'}`;
 
 // Cuts to max characters, ending in an ellipsis when it had to cut.

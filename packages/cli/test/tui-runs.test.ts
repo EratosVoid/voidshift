@@ -194,3 +194,11 @@ test('LogView follows a growing file', async () => {
   assert.match(ui.lastFrame() ?? '', /01-vs-dev\.log/);
   ui.unmount();
 });
+
+test('a step line shows its tokens and cost, and nothing without usage', async () => {
+  const { stepLine } = await import('../src/tui/screens/runs.ts');
+  const step: StepRecord = { step: 'vs-dev', label: 'Dev', startedAt: '2026-10-20T10:00:00.000Z', endedAt: '2026-10-20T10:05:00.000Z', result: 'done', summary: 'did it' };
+  const line = (s: StepRecord) => stepLine(s, Date.parse('2026-10-20T10:06:00.000Z')).map((x) => x.text).join('');
+  assert.ok(!line(step).includes('est.'));
+  assert.match(line({ ...step, usage: { input: 12_300, output: 4100, costUsd: 0.42, model: 'opus' } }), /12\.3k in, 4\.1k out, \$0\.42 est\.  did it$/);
+});

@@ -116,21 +116,28 @@ function liveCardOf(current: AgentsCurrent, state: LiveState, nowMs: number): Li
   };
 }
 
-// "● Runner running" and "last check 14:03 · next in 41s".
+// "● Runner running" and "5h 62% · last check 14:03 · next in 41s". A runner
+// held by the 5 hour window says so in yellow.
 export function runnerLines(agents: AgentsStatus, nowMs: number): { left: Line; right: Line } {
+  const w = agents.window;
+  const held = w?.heldUntil && Date.parse(w.heldUntil) > nowMs ? w.heldUntil : null;
+  const pct = w?.utilization !== undefined ? `${Math.round(w.utilization)}%` : '';
   const left: Line =
-    agents.runner === 'running'
+    agents.runner === 'running' && held
+      ? [seg('● ', theme.yellow), seg(`Runner held: 5h window ${pct} until ${clock(new Date(held))}`, theme.yellow)]
+      : agents.runner === 'running'
       ? [seg('● ', theme.green), seg('Runner running')]
       : agents.runner === 'paused'
         ? [seg('● ', theme.yellow), seg('Runner paused'), seg('  p resumes it', theme.dim)]
         : [seg('○ ', theme.dim), seg('Runner stopped'), seg('  vsf agents start', theme.dim)];
-  const right: Line = [];
+  const parts: string[] = [];
+  if (pct && !held) parts.push(`5h ${pct}`);
   if (agents.lastTick) {
     const next = agents.runner === 'running' ? secondsToNextCheck(agents.lastTick.at, nowMs) : null;
-    const parts = [`last check ${clock(new Date(agents.lastTick.at))}`];
+    parts.push(`last check ${clock(new Date(agents.lastTick.at))}`);
     if (next !== null) parts.push(next > 0 ? `next in ${next}s` : 'due now');
-    right.push(seg(parts.join(' · '), theme.dim));
   }
+  const right: Line = parts.length ? [seg(parts.join(' · '), theme.dim)] : [];
   return { left, right };
 }
 

@@ -18,7 +18,7 @@ import {
   verdictBlock,
   type StepResult,
 } from './workflow.ts';
-import { agentsDir, hasWork, isCardTrigger, resolveProject, resolveStep, stepId, stepIdLabel, workspaceContext, workspaceOf, type AgentsConfig, type ResolvedStep, type Workflow, type Project, type Trigger } from './config.ts';
+import { DEFAULTS, agentsDir, hasWork, isCardTrigger, resolveProject, resolveStep, stepId, stepIdLabel, workspaceContext, workspaceOf, type AgentsConfig, type ResolvedStep, type Workflow, type Project, type Trigger } from './config.ts';
 import { lastDue, parseCron } from './cron.ts';
 import { runAgent, stopAgents } from './engine.ts';
 import { commitsAhead, enforceCommitPolicy, defaultBranch, ensureDraftPr, ensureWorktree, headSha, markReady, push, resetWorktree, waitForChecks, waitForPrHead } from './git.ts';
@@ -27,7 +27,8 @@ import { noTracker, type Tracker, type Trackers } from './tracker.ts';
 import { recall, syncMemory, vaultPath } from './memory.ts';
 import type { RunEvent, RunKind } from './notify.ts';
 import { claudeSettingsFile, readRules, rulesSection } from './profile.ts';
-import { acquireWorkspace, clearCurrent, heldByOther, isPaused, liveRuns, readCurrent, readPending, releaseWorkspace, writeCurrent, writePending, writeRun, writeWorkspace, readCronState, writeCronState, type Pending, type RunRecord, type StepRecord } from './state.ts';
+import { acquireWorkspace, addUsage, clearCurrent, heldByOther, isPaused, liveRuns, readCurrent, readPending, readWindow, releaseWorkspace, writeCurrent, writePending, writeRun, writeWorkspace, readCronState, writeCronState, type Current, type Pending, type RunRecord, type StepRecord } from './state.ts';
+import { WINDOW_MS, clock, refreshWindow, windowHold, windowStale } from './usage.ts';
 
 const stamp = () => new Date().toISOString().replace(/[:.]/g, '-');
 
@@ -232,6 +233,11 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
     // fails ends the run as failed with its own error.
     async function agent(def: ResolvedStep, rec: StepRecord, log: string, prompt: string) {
       const r = await runAgent({ engine: def.engine, model: def.model, cwd: worktree, vault, settingsFile, write: def.write, logFile: log, timeoutMs: def.timeoutMs, platform: rc.platform, prompt });
+      // Saved with the step's end, failed or not.
+      if (r.usage) {
+        rec.usage = r.usage;
+        record.usage = addUsage(record.usage, r.usage);
+      }
       if (!def.write || def.builtin === 'vs-qa') resetWorktree(worktree);
       if (!r.ok) {
         end(rec, 'failed', r.output, log);
@@ -578,6 +584,22 @@ function queueCancel(configDir: string, cardId: string, comment: string, source:
   }
 }
 
+// The card runs that take a slot under the cap. A lock with no card is a
+// check, not a run.
+const cardRuns = (configDir: string): Current[] => liveRuns(configDir).filter((c) => c.card && c.pid !== process.pid);
+
+// Why no new run may start now: the 5 hour window is held, or the cap is
+// reached. Null when one may.
+export function gateReason(rc: Pick<RunContext, 'configDir' | 'config'>, now = new Date()): string | null {
+  const w = readWindow(rc.configDir);
+  const until = windowHold(w, rc.config.pauseAt ?? DEFAULTS.pauseAt!, now);
+  if (until) return `The 5 hour window is at ${Math.round(w!.utilization!)}%, so no new run starts until ${clock(until)}. Running cards finish.`;
+  const max = rc.config.maxRuns ?? 0;
+  const running = max > 0 ? cardRuns(rc.configDir).length : 0;
+  if (max > 0 && running >= max) return `${running} of ${max} runs are going, so no new one starts until one finishes.`;
+  return null;
+}
+
 // Runs one job in its workspace's queue: a pinned card, a workflow's schedule,
 // or the first job waiting in a free workspace. The workspace lock keeps two
 // runs from working in one workspace at once. `child` is a run the dispatcher
@@ -619,6 +641,12 @@ export async function tick(rc: RunContext, only?: string, opts: { workflow?: str
   try {
     if (!opts.child) await flushPending(rc);
     if (!only && isPaused(rc.configDir)) return 0;
+    // A named card goes ahead of the cap and the hold, as it does a pause.
+    const gate = !only && !opts.child ? gateReason(rc) : null;
+    if (gate) {
+      rc.log(gate);
+      return 0;
+    }
     let job: Job | null;
     try {
       const busy = only ? undefined : new Set(liveRuns(rc.configDir).filter((c) => c.pid !== process.pid).map((c) => workspaceOf(c)));
@@ -673,6 +701,8 @@ export interface DispatchDeps {
   waitMs: number;
   // The config as it is now, read again on every pass.
   reload?: () => AgentsConfig;
+  // Reads the 5 hour window into window.json; must not throw.
+  window: () => Promise<unknown>;
 }
 
 // The arguments that make a child tick run exactly this job.
@@ -685,6 +715,7 @@ const realDeps = (rc: RunContext): DispatchDeps => ({
     return spawn(bin!, [...rest, 'agents', 'tick', ...args], { stdio: 'inherit' });
   },
   waitMs: 60_000,
+  window: () => refreshWindow(rc.configDir),
 });
 
 // The background runner. The service starts a new pass only once the last one
@@ -716,11 +747,35 @@ export async function dispatch(rc: RunContext, over: Partial<DispatchDeps> = {})
   };
   process.on('SIGTERM', onSignal);
   process.on('SIGINT', onSignal);
+  // The window is read once at the start when the last reading is old, then
+  // every 5 minutes while runs go on, one read at a time.
+  let reading = false;
+  const readWindowNow = async () => {
+    if (reading) return;
+    reading = true;
+    try {
+      await deps.window();
+    } catch {
+      // window.json keeps the last reading
+    } finally {
+      reading = false;
+    }
+  };
+  let timer: ReturnType<typeof setInterval> | undefined;
+  let wasHeld = false;
   try {
+    if (windowStale(readWindow(rc.configDir))) await readWindowNow();
+    timer = setInterval(() => void readWindowNow(), WINDOW_MS);
+    timer.unref();
     for (;;) {
       if (deps.reload) rc = { ...rc, config: deps.reload() };
       await flushPending(rc);
       const paused = isPaused(rc.configDir);
+      const w = readWindow(rc.configDir);
+      const heldUntil = windowHold(w, rc.config.pauseAt ?? DEFAULTS.pauseAt!, new Date());
+      if (heldUntil && !wasHeld) rc.log(`The 5 hour window is at ${Math.round(w!.utilization!)}%, so no new run starts until ${clock(heldUntil)}. Running cards finish.`);
+      if (!heldUntil && wasHeld) rc.log('The 5 hour window reset, so new runs start again.');
+      wasHeld = !!heldUntil;
       if (rc.summary) {
         try {
           await rc.summary(paused);
@@ -728,10 +783,14 @@ export async function dispatch(rc: RunContext, over: Partial<DispatchDeps> = {})
           rc.log(`discord: ${(err as Error).message}`);
         }
       }
-      if (!paused) {
+      // Only card runs take a slot under the cap.
+      const running = new Set([...children.keys(), ...cardRuns(rc.configDir).map((c) => workspaceOf(c))]);
+      const max = rc.config.maxRuns ?? 0;
+      const limit = max > 0 ? max - running.size : Infinity;
+      if (!paused && !heldUntil && limit > 0) {
         const busy = new Set([...children.keys(), ...liveRuns(rc.configDir).map((c) => workspaceOf(c))]);
         const skip = new Set([...started].filter(([, at]) => Date.now() - at < deps.waitMs).map(([id]) => id));
-        for (const job of await findJobs(rc, { busy, skip })) {
+        for (const job of await findJobs(rc, { busy, skip, limit })) {
           started.set(job.card.identifier, Date.now());
           rc.log(`${job.card.identifier} starts ${job.workflow} in workspace ${job.workspace}.`);
           const child = deps.start(jobArgs(job));
@@ -762,6 +821,7 @@ export async function dispatch(rc: RunContext, over: Partial<DispatchDeps> = {})
     rc.log(`Error: ${(err as Error).message}`);
     return 1;
   } finally {
+    clearInterval(timer);
     process.off('SIGTERM', onSignal);
     process.off('SIGINT', onSignal);
     clearCurrent(rc.configDir);

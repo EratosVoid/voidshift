@@ -103,6 +103,15 @@ vsf agents project edit erp --workspace solvia --match DS06
 Atleurope ERP"). A card of that project runs in the matching project, in any
 workspace, before the workflow's own project is considered.
 
+Two settings keep runs inside your Claude subscription. `vsf config set
+agents.maxRuns 2` caps how many cards run at once over every workspace (0, the
+default, is no cap). Every 5 minutes the runner reads your 5 hour window with
+Claude Code's login, read only, and once it reaches `agents.pauseAt` percent
+(90 by default, 0 turns it off) no new run starts until the window resets;
+running cards finish. `vsf agents status` shows the window, and each run's
+`run.json` keeps the tokens and estimated cost of every step. Naming a card,
+`vsf agents run CARD`, starts it anyway.
+
 A workflow can also be a folder you write by hand,
 `~/.config/voidshift/agents/defs/NAME/agent.json`, with its prompt files next to
 it. Steps are the built-in ids above or your own:

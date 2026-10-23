@@ -196,6 +196,8 @@ export function validateConfig(value: unknown, saved?: Pick<AgentsConfig, 'proje
   if (!isObj(value.models) || Object.values(value.models).some((m) => typeof m !== 'string')) problems.push('models must map names to text.');
   if (typeof value.reviewState !== 'string' || !value.reviewState.trim()) problems.push('reviewState must be a non-empty string.');
   if (!isInt(value.timeoutMinutes, 1, 480)) problems.push('timeoutMinutes must be a whole number from 1 to 480.');
+  if (value.maxRuns !== undefined && !isInt(value.maxRuns, 0, 32)) problems.push('maxRuns must be a whole number from 0 to 32, 0 for no cap.');
+  if (value.pauseAt !== undefined && !isInt(value.pauseAt, 0, 100)) problems.push('pauseAt must be a whole number from 0 to 100, 0 to never hold.');
   const projects = isObj(value.projects) ? value.projects : null;
   if (!projects) problems.push('projects must be an object.');
   for (const [name, p] of Object.entries(projects ?? {})) {

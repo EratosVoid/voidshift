@@ -2,14 +2,15 @@ import { spawnSync } from 'node:child_process';
 import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
-import { agentsDir, isCardTrigger, readAgentsConfig, workspaceOf, workspacesInUse, type AgentsConfig, type Tracker as Kind } from './config.ts';
-import { isPaused, listRuns, ours, clearLock, liveCurrent, liveRuns, readCurrent, setPaused, workspaceLocks, writeRun, type Current, type RunEntry } from './state.ts';
+import { DEFAULTS, agentsDir, isCardTrigger, readAgentsConfig, workspaceOf, workspacesInUse, type AgentsConfig, type Tracker as Kind } from './config.ts';
+import { isPaused, listRuns, ours, clearLock, liveCurrent, liveRuns, readCurrent, readWindow, setPaused, usageText, workspaceLocks, writeRun, type Current, type RunEntry } from './state.ts';
+import { windowHold, windowLine } from './usage.ts';
 import { runnerService } from './service.ts';
 import { TRACKERS, trackersFor, type Tracker, type Trackers } from './tracker.ts';
 import type { Card } from './linear.ts';
 import { parseFrom, resolveName, stepNames } from './names.ts';
 import { isStatusLabel } from './workflow.ts';
-import { cancelCard, dispatch, tick } from './runner.ts';
+import { cancelCard, dispatch, gateReason, tick } from './runner.ts';
 import { notifyRun, notifyRunner, sendSummary, type RunEvent } from './notify.ts';
 import type { Check, ToolCommand, ToolContext } from './types.ts';
 
@@ -137,7 +138,7 @@ const USAGE: Record<string, string> = {
   restart: 'restart   Stop and start the runner',
   pause: 'pause   Pick up no new cards; a card in progress carries on',
   resume: 'resume   Pick up new cards again',
-  run: 'run [CARD] [--workflow W] [--from STEP]   Run now instead of waiting for the next minute',
+  run: 'run [CARD] [--workflow W] [--from STEP]   Run now instead of waiting for the next minute; a named card skips the pause, the cap and the window hold',
   cancel: 'cancel [CARD]   Stop a card being worked on and clear its labels',
   retry: 'retry CARD [--workflow W]   Queue a parked or cancelled card again',
   runs: 'runs [CARD] [--limit N] [--json]   Past runs, newest first',
@@ -335,8 +336,12 @@ const status = guard(async (args, ctx) => {
   }
   const workflows = Object.keys(config.workflows).length;
   const projects = Object.keys(config.projects).length;
+  const pauseAt = config.pauseAt ?? DEFAULTS.pauseAt!;
+  const maxRuns = config.maxRuns ?? 0;
+  const w = readWindow(ctx.configDir);
   if (p.values.json) {
-    ctx.log(JSON.stringify({ engine: config.engine, runner, lastTick, current, running, parked, interrupted, workflows, projects }, null, 2));
+    const window = w && { ...w, heldUntil: windowHold(w, pauseAt) };
+    ctx.log(JSON.stringify({ engine: config.engine, runner, lastTick, current, running, parked, interrupted, workflows, projects, window, maxRuns }, null, 2));
     return 0;
   }
   // One workspace keeps the single line; several get a line each.
@@ -347,6 +352,9 @@ const status = guard(async (args, ctx) => {
   else if (runner === 'paused') ctx.log(`Runner: paused, picks up no new cards. vsf agents resume to continue.${working}`);
   else ctx.log('Runner: stopped. vsf agents start to begin.');
   if (perWorkspace) for (const line of workspaceLines(workspaces, running)) ctx.log(line);
+  const windowText = windowLine(w, pauseAt);
+  if (windowText) ctx.log(windowText);
+  if (maxRuns) ctx.log(`Cap: at most ${plural(maxRuns, 'run')} at once.`);
   if (lastTick) ctx.log(`Last check: ${clock(new Date(lastTick.at))}, ${lastTick.line.replace(/\.$/, '') || 'no details'}.`);
   for (const card of interrupted) ctx.log(`Interrupted: ${card}. vsf agents retry ${card} to run it again.`);
   for (const k of parked) ctx.log(`Parked: ${k.card}${k.reason ? ` (${k.reason.replace(/\.$/, '')})` : ''}. vsf agents retry ${k.card} after fixing the cause.`);
@@ -420,6 +428,7 @@ const run = guard(async (args, ctx) => {
   const code = await tick({ configDir: ctx.configDir, config, trackers: trackersFor(ctx.configDir), log: ctx.log, selfCommand: ctx.selfCommand }, card, { workflow, from });
   if (!card && code === 0) {
     if (isPaused(ctx.configDir)) ctx.log('The runner is paused, so nothing was picked up. vsf agents resume, or name a card.');
+    else if (gateReason({ configDir: ctx.configDir, config })) ctx.log('Name a card to run it anyway.');
     else ctx.log('Nothing to do, or the card was verified.');
   }
   return code;
@@ -558,8 +567,11 @@ const show = guard(async (args, ctx) => {
   if (labels) ctx.log(`Labels: ${labels.join(', ') || 'none'}`);
   for (const s of latest.steps) {
     const took = s.endedAt ? formatDuration(Date.parse(s.endedAt) - Date.parse(s.startedAt)) : 'running';
-    ctx.log(`  ${s.label.padEnd(12)} ${(s.result ?? 'running').toLowerCase().padEnd(8)} ${took.padEnd(6)} ${oneLine(s.summary ?? '')}`.trimEnd());
+    const used = usageText(s.usage);
+    ctx.log(`  ${s.label.padEnd(12)} ${(s.result ?? 'running').toLowerCase().padEnd(8)} ${took.padEnd(6)} ${used ? `${used}  ` : ''}${oneLine(s.summary ?? '')}`.trimEnd());
   }
+  const total = usageText(latest.usage);
+  if (total || latest.usage?.models?.length) ctx.log(`Usage: ${[total, latest.usage?.models?.join(', ')].filter(Boolean).join(', ')}`);
   if (latest.outcome === 'parked' && latest.reason) ctx.log(`Parked: ${oneLine(latest.reason, 300)}`);
   if (all.length > 1) ctx.log(`${plural(all.length, 'run')} in total. vsf agents runs ${id} lists them.`);
   return 0;

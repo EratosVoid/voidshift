@@ -7,6 +7,7 @@ import { emptyState, runsThisWeek, updateNotice, type AgentsStatus, type DataSta
 import { barParts, cycle, editText, fitCell } from '../src/tui/widgets.ts';
 import { duration, minutesText, secondsToNextCheck, truncate } from '../src/tui/format.ts';
 import { fakeData, newSpy, withFakes } from './tui-helpers.ts';
+import { theme } from '../src/tui/theme.ts';
 
 const text = (line: { text: string }[]) => line.map((s) => s.text).join('');
 
@@ -131,6 +132,18 @@ test('runner line shows state, last check and the countdown', () => {
   assert.match(text(runnerLines({ ...agents, runner: 'paused' }, NOW).left), /paused/);
   assert.equal(text(runnerLines({ ...agents, runner: 'running', lastTick: { at: iso(5), line: '' } }, NOW).right).includes('due now'), true);
   assert.equal(runnerLines({ ...agents, runner: 'stopped', lastTick: null }, NOW).right.length, 0);
+});
+
+test('the runner line shows the 5 hour window, and the hold in yellow', () => {
+  const window = { checkedAt: iso(1), utilization: 61.7, resetsAt: iso(-120), heldUntil: null };
+  const open = runnerLines({ ...agents, window }, NOW);
+  assert.equal(text(open.left), '● Runner running');
+  assert.match(text(open.right), /^5h 62% · last check \d\d:\d\d · next in 41s$/);
+  const held = runnerLines({ ...agents, window: { ...window, utilization: 91, heldUntil: iso(-120) } }, NOW);
+  assert.match(text(held.left), /^● Runner held: 5h window 91% until \d\d:\d\d$/);
+  assert.equal(held.left[1]!.colour, theme.yellow);
+  assert.ok(!text(held.right).includes('5h'));
+  assert.equal(text(runnerLines({ ...agents, window: null }, NOW).right).includes('5h'), false, 'no window, no segment');
 });
 
 test('parked and interrupted cards are what r can retry', () => {
