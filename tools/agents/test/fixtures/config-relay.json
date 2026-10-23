@@ -1,0 +1,25 @@
+{
+  "engine": "claude",
+  "models": { "dev": "opus", "review": "sonnet" },
+  "projects": {
+    "tether-relay": { "path": "/code/tether-relay", "base": "main" }
+  },
+  "workflows": {
+    "tether-relay-automation": {
+      "triggers": [{ "source": "linear", "team": "ENG", "label": "vs-plan" }],
+      "steps": ["vs-plan", "vs-plan-review", "vs-dev", "vs-qa"],
+      "maxRounds": 3,
+      "project": "tether-relay"
+    },
+    "tether-relay-qa-only": {
+      "triggers": [{ "source": "linear", "team": "ENG", "label": "vs-review" }],
+      "steps": ["vs-qa"],
+      "maxRounds": 1,
+      "project": "tether-relay"
+    }
+  },
+  "reviewState": "In Review",
+  "timeoutMinutes": 45,
+  "homes": [{ "kind": "claude", "dir": "/home/me/.claude" }],
+  "enabled": ["vs-plan", "vs-plan-review", "vs-publish", "vs-dev", "vs-qa"]
+}

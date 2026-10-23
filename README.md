@@ -86,7 +86,32 @@ vsf agents workflow add|edit|show|rename|move|rm
 vsf agents projects | project add|edit|show|rename|rm
 vsf agents homes | link DIR        # where the agents are installed
 vsf agents clean                   # old worktrees and run logs
+vsf agents validate [DIR]          # check the config and agent folders
 ```
+
+A workflow can also be a folder you write by hand,
+`~/.config/voidshift/agents/defs/NAME/agent.json`, with its prompt files next to
+it. Steps are the built-in ids above or your own:
+
+```json
+{
+  "triggers": [{ "source": "cron", "schedule": "0 7 * * 1-5", "task": "Morning brief" }],
+  "steps": [{ "id": "brief", "prompt": "brief.md", "output": "none", "model": "haiku", "timeoutMinutes": 10 }],
+  "maxRounds": 1,
+  "project": "tether-relay",
+  "writeBack": { "labels": true, "state": null, "comment": true }
+}
+```
+
+A step's `output` is `plan`, `verdict`, `commits`, `publish` or `none`; a failed
+`verdict` sends the work back to the nearest `plan` or `commits` step. `engine`,
+`model` and `timeoutMinutes` fall back to the config, and `write` to true only
+for `commits`. A `publish` step takes no prompt; the others take one `prompt`
+file or `skill`, which must ask for a `RESULT:` line (`plan`, `commits`) or a
+`VERDICT:` line (`verdict`). `writeBack` applies to card runs: `state` moves a
+verified card there (`null` never moves it), `labels: false` only takes the
+trigger label off, and `comment: false` skips the closing comment. Edit the file,
+then `vsf agents validate`.
 
 ### memory
 

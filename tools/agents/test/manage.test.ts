@@ -1,10 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DEFAULTS, type AgentsConfig, type Workflow } from '../src/config.ts';
-import { duplicateTriggerWarnings, moveKey, parseTrigger, renameKey, validateConfig, validateWorkflow, workflowsUsing } from '../src/manage.ts';
+import { duplicateTriggerWarnings, moveKey, parseTrigger, renameKey, validateAgentFolder, validateConfig, validateWorkflow, workflowsUsing } from '../src/manage.ts';
 
 const wf = (o: Partial<Workflow> = {}): Workflow => ({ triggers: [{ source: 'linear', team: 'ENG', label: 'vs-plan' }], steps: ['vs-dev', 'vs-qa'], maxRounds: 3, project: 'p', ...o });
 const cfg = { enabled: [] as string[], projects: { p: { path: '/x' } } };
@@ -92,4 +92,48 @@ test('duplicateTriggerWarnings names the other workflow and the winner', () => {
   ]);
   assert.deepEqual(duplicateTriggerWarnings(workflows, 'b', workflows.b), []);
   assert.match(duplicateTriggerWarnings(workflows, 'a', workflows.a)[0]!, /c also starts on ENG \+ vs-plan, and a wins/);
+});
+
+// An agent folder with agent.json and prompt files, for validateAgentFolder.
+function agentFolder(agent: Record<string, unknown> | string, files: Record<string, string> = {}) {
+  const dir = join(mkdtempSync(join(tmpdir(), 'vsf-defs-')), 'brief');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'agent.json'), typeof agent === 'string' ? agent : JSON.stringify(agent));
+  for (const [name, text] of Object.entries(files)) writeFileSync(join(dir, name), text);
+  return dir;
+}
+
+const files = { 'brief.md': 'Write the brief.', 'build.md': 'Build it.\nRESULT: DONE', 'check.md': 'Check it.\nVERDICT: SHIP' };
+const agent = (steps: unknown[], o: Record<string, unknown> = {}) => ({ triggers: [{ source: 'cron', schedule: '0 5 * * *', task: 'go' }], steps, maxRounds: 1, project: 'p', ...o });
+const folderCfg = { ...cfg, workflows: {} };
+
+test('validateAgentFolder accepts a good folder', () => {
+  const dir = agentFolder(agent([{ id: 'brief', prompt: 'brief.md', output: 'none' }, { id: 'build', prompt: 'build.md', output: 'commits' }, { id: 'check', prompt: 'check.md', output: 'verdict', engine: 'codex', model: 'o4', timeoutMinutes: 10 }, { id: 'push', output: 'publish' }, 'vs-qa'], { writeBack: { labels: false, state: null, comment: false } }), files);
+  assert.deepEqual(validateAgentFolder(dir, folderCfg), []);
+});
+
+test('validateAgentFolder reports each problem', () => {
+  const problems = (steps: unknown[], o: Record<string, unknown> = {}) => validateAgentFolder(agentFolder(agent(steps, o), files), folderCfg).join(' ');
+  assert.match(problems([{ id: 'a', prompt: 'missing.md', output: 'none' }]), /a prompt .*missing\.md does not exist/);
+  assert.match(problems([{ id: 'a', prompt: 'brief.md', output: 'poem' }]), /a output must be one of/);
+  assert.match(problems([{ id: 'a', prompt: 'brief.md', skill: 'vs-dev', output: 'none' }]), /exactly one of skill or prompt/);
+  assert.match(problems([{ id: 'a', prompt: 'brief.md', output: 'publish' }]), /takes no skill or prompt/);
+  assert.match(problems([{ id: 'a', output: 'none' }]), /exactly one of skill or prompt/);
+  assert.match(problems([{ id: 'a', prompt: 'brief.md', output: 'none' }, { id: 'a', prompt: 'brief.md', output: 'none' }]), /Step id a is used twice/);
+  assert.match(problems([{ id: 'a', prompt: 'brief.md', output: 'none', timeoutMinutes: 0 }]), /timeoutMinutes/);
+  assert.match(problems([{ id: 'a', prompt: 'brief.md', output: 'none', write: 'yes' }]), /write must be true or false/);
+  assert.match(problems([{ id: 'a', prompt: 'build.md', output: 'commits', write: false }]), /write cannot be false/);
+  assert.match(problems([{ id: 'a', prompt: 'brief.md', output: 'verdict' }]), /a prompt never asks for a VERDICT: line/);
+  assert.match(problems([{ id: 'a', prompt: 'brief.md', output: 'commits' }]), /a prompt never asks for a RESULT: line/);
+  assert.match(problems([{ id: 'a', prompt: 'brief.md', output: 'none' }], { writeBack: { labels: 'no' } }), /writeBack.labels/);
+  assert.match(problems([{ id: 'a', prompt: 'brief.md', output: 'none', engine: 'gpt' }]), /engine/);
+  assert.match(problems([{ id: 'vs-dev', prompt: 'build.md', output: 'commits' }]), /built-in step/);
+  assert.match(problems([{ id: 'A b', prompt: 'brief.md', output: 'none' }]), /lowercase/);
+  assert.match(validateAgentFolder(agentFolder('{ nope' as never), folderCfg).join(' '), /agent\.json/);
+});
+
+test('validateAgentFolder flags a name config.json already uses', () => {
+  const dir = agentFolder(agent([{ id: 'a', prompt: 'brief.md', output: 'none' }]), files);
+  assert.match(validateAgentFolder(dir, { ...folderCfg, workflows: { brief: wf() } }).join(' '), /config\.json already has a workflow named brief/);
+  assert.deepEqual(validateAgentFolder(dir, { ...folderCfg, workflows: { brief: wf() }, folders: { brief: dir } }), []);
 });

@@ -7,7 +7,7 @@ import { isPaused, listRuns, ours, clearCurrent, liveCurrent, readCurrent, setPa
 import { runnerService } from './service.ts';
 import { TRACKERS, trackersFor, type Tracker, type Trackers } from './tracker.ts';
 import type { Card } from './linear.ts';
-import { parseStep, resolveName, stepNames } from './names.ts';
+import { parseFrom, resolveName, stepNames } from './names.ts';
 import { isStatusLabel } from './workflow.ts';
 import { cancelCard, tick } from './runner.ts';
 import type { Check, ToolCommand, ToolContext } from './types.ts';
@@ -376,7 +376,7 @@ const run = guard(async (args, ctx) => {
   }
   let from;
   if (p.values.from) {
-    from = parseStep(p.values.from);
+    from = parseFrom(p.values.from);
     if (!from) {
       ctx.log(`Unknown step ${p.values.from}. Steps: ${stepNames()}.`);
       return 2;
