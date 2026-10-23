@@ -1,6 +1,6 @@
 {
   "name": "@voidlabs.gg/voidshift-memory",
-  "version": "0.4.5",
+  "version": "0.5.0",
   "description": "A markdown memory vault recalled into Claude Code and Codex before every prompt.",
   "license": "Apache-2.0",
   "repository": {
