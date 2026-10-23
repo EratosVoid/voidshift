@@ -58,3 +58,16 @@ export function fakeData(patch: Partial<DataState>): Data {
 export function withFakes(spy: Spy, data: Data, child: React.ReactElement, over: Partial<ScreenContext> = {}): React.ReactElement {
   return React.createElement(DataContext.Provider, { value: data }, React.createElement(ScreenCtx.Provider, { value: fakeScreen(spy, over) }, child));
 }
+
+// Waits until the rendered frame passes `check`, polling, so a slow machine
+// gets time instead of a fixed sleep. Throws with the last frame on timeout.
+export async function frameUntil(r: { lastFrame: () => string | undefined }, check: (frame: string) => boolean, ms = 3000): Promise<string> {
+  const end = Date.now() + ms;
+  let frame = r.lastFrame() ?? '';
+  while (!check(frame)) {
+    if (Date.now() > end) throw new Error(`frame never matched within ${ms}ms. Last frame:\n${frame}`);
+    await new Promise((res) => setTimeout(res, 10));
+    frame = r.lastFrame() ?? '';
+  }
+  return frame;
+}
