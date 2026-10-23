@@ -18,7 +18,8 @@
     "agents",
     "linear",
     "cli",
-    "macos"
+    "macos",
+    "linux"
   ],
   "type": "module",
   "bin": {
@@ -29,9 +30,6 @@
     "dist",
     "LICENSE",
     "README.md"
-  ],
-  "os": [
-    "darwin"
   ],
   "engines": {
     "node": ">=22.18"

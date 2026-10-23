@@ -7,6 +7,8 @@ export interface ToolEntry {
   summary: string;
   pkg: string;
   status: 'planned' | 'available';
+  // Platforms the tool runs on; every platform when unset.
+  platforms?: NodeJS.Platform[];
 }
 
 export const registry: ToolEntry[] = [
@@ -15,6 +17,7 @@ export const registry: ToolEntry[] = [
     summary: 'Keep the Mac running on battery with the lid closed, with guardrails',
     pkg: '@voidlabs.gg/voidshift-awake',
     status: 'available',
+    platforms: ['darwin'],
   },
   {
     name: 'agents',
@@ -29,6 +32,14 @@ export const registry: ToolEntry[] = [
     status: 'available',
   },
 ];
+
+export const runsHere = (t: ToolEntry, platform: NodeJS.Platform = process.platform) => !t.platforms || t.platforms.includes(platform);
+
+// Why a tool cannot be added here, or null when it can.
+export function unavailable(t: ToolEntry, platform: NodeJS.Platform = process.platform): string | null {
+  if (t.status === 'planned') return 'coming soon';
+  return runsHere(t, platform) ? null : 'macOS only';
+}
 
 export function findTool(name: string): ToolEntry | undefined {
   return registry.find((t) => t.name === name);

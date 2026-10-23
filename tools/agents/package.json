@@ -18,7 +18,8 @@
     "agents",
     "linear",
     "cli",
-    "macos"
+    "macos",
+    "linux"
   ],
   "type": "module",
   "main": "dist/index.js",
@@ -28,9 +29,6 @@
     "pack",
     "LICENSE",
     "README.md"
-  ],
-  "os": [
-    "darwin"
   ],
   "engines": {
     "node": ">=22.18"

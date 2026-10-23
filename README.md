@@ -5,7 +5,7 @@ One CLI for the Void dev tools. Install it once, run `vsf` (short for
 defaults you can change. Everything setup does can be seen and changed later
 from the command line.
 
-> Early release. macOS only for now; Windows and Linux are next.
+> Early release. macOS and Linux (awake is macOS only); Windows is next.
 
 ```sh
 npm i -g @voidlabs.gg/voidshift
@@ -104,10 +104,13 @@ to trust the recall hook once: run `/hooks` in Codex.
 - **Your own logins.** Agents run the official `claude` and `codex` CLIs you
   already use, signed in with your own account. VoidShift never reads or
   stores those credentials. The Linear API key for the runner lives in your
-  macOS Keychain.
+  macOS Keychain, or on Linux in `~/.config/voidshift/agents/secrets.json`
+  (mode 0600).
 - **Trust.** The Dev agent can run shell commands inside its copy of the repo
   so it can install and test. Review its pull requests like any other.
 - **Your config** lives in `~/.config/voidshift`.
+- **Linux.** The runner is a systemd user timer. Run
+  `sudo loginctl enable-linger $USER` so it keeps going after you log out.
 
 ```sh
 vsf doctor                     # check everything is set up, and whether an update is out

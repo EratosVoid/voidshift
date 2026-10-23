@@ -1,6 +1,6 @@
 import { context, readConfig, writeConfig } from '../config.ts';
 import { fetchTool, loadTool } from '../loader.ts';
-import { findTool, registry, type ToolEntry } from '../registry.ts';
+import { findTool, registry, unavailable, type ToolEntry } from '../registry.ts';
 import type { Tool } from '../tool.ts';
 import { needsTerminal, wantsHelp } from './args.ts';
 
@@ -8,7 +8,8 @@ export function listTools(): number {
   const installed = new Set(readConfig().tools);
   const width = Math.max(...registry.map((t) => t.name.length));
   for (const t of registry) {
-    const tag = installed.has(t.name) ? ' (added)' : t.status === 'planned' ? ' (coming soon)' : '';
+    const why = unavailable(t);
+    const tag = installed.has(t.name) ? ' (added)' : why ? ` (${why})` : '';
     console.log(`${t.name.padEnd(width)}  ${t.summary}${tag}`);
   }
   return 0;
@@ -30,6 +31,10 @@ export async function addTool(name: string | undefined): Promise<number> {
   if (!entry) return 2;
   if (entry.status === 'planned') {
     console.error(`${entry.name} is not released yet.`);
+    return 1;
+  }
+  if (unavailable(entry)) {
+    console.error(`${entry.name} runs on macOS only.`);
     return 1;
   }
   const ctx = context();

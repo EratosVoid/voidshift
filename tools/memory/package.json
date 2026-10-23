@@ -18,7 +18,8 @@
     "memory",
     "markdown",
     "cli",
-    "macos"
+    "macos",
+    "linux"
   ],
   "type": "module",
   "main": "dist/index.js",
@@ -27,9 +28,6 @@
     "dist",
     "LICENSE",
     "README.md"
-  ],
-  "os": [
-    "darwin"
   ],
   "engines": {
     "node": ">=22.18"
