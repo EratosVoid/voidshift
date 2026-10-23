@@ -127,8 +127,17 @@ vsf memory status          # the vault and where recall is on
 vsf memory search WORDS    # notes recall would bring up
 vsf memory try "a prompt"  # exactly what recall would add to that prompt
 vsf memory check           # notes missing from INDEX.md, broken links
+vsf memory sync            # pull and push the vault through its git remote
 vsf memory on | off        # turn recall on or off
 ```
+
+To share the vault between machines, make it a git repository with a remote
+named `origin` (any host; a private repository). `vsf memory sync` commits new
+notes, rebases onto the remote and pushes. It also runs in the background from
+the recall hook when the last sync is over ten minutes old, and the agents
+runner syncs before and after every run. When a note changed on both sides,
+the remote's version stays and this machine's copy is saved beside it as
+`note.conflict-<machine>-<time>.md`, so nothing is lost.
 
 Setup creates a vault at `~/memory` or uses one you already have. Codex asks you
 to trust the recall hook once: run `/hooks` in Codex.

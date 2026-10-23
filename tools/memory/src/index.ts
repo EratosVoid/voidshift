@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -7,6 +7,7 @@ import { analyzeVault, diffHomes, hasProblems, indexTargets, missingHookPaths, v
 import { addHook, hasOurHook, hookFile, otherRecall, ourHookCommand, recallCommand, removeHook } from './hooks.ts';
 import { hookOutput, match, previewContext, recallContext } from './recall.ts';
 import { countNotes, isVault, listNotes, memoryDir, readMemoryConfig, scaffold, skillText, writeMemoryConfig, type Home, type MemoryConfig } from './vault.ts';
+import { describeSync, isStale, readLastSync, syncVault, writeLastSync } from './sync.ts';
 import type { Check, Tool, ToolContext, Ui } from './types.ts';
 
 const has = (cmd: string) => spawnSync(cmd, ['--version'], { encoding: 'utf8' }).status === 0;
@@ -96,10 +97,11 @@ const usages: Record<string, string> = {
   try: 'vsf memory try PROMPT...\n  Show what recall would add to that prompt, without changing real sessions',
   on: 'vsf memory on [DIR]\n  Turn recall on in every saved config folder, or just DIR',
   off: 'vsf memory off [DIR]\n  Turn recall off in every saved config folder, or just DIR. Keeps the skill',
+  sync: 'vsf memory sync [--quiet] [--json] [--if-stale MINUTES]\n  Commit notes, pull and push the vault through its git remote (origin). Both sides of a clash are kept',
   help: 'vsf memory help [COMMAND]\n  Usage for one command, or the full list',
   recall: 'vsf memory recall\n  The prompt hook (reads the hook\'s JSON on stdin). Not run by hand',
 };
-const listed = ['status', 'search', 'check', 'try', 'on', 'off', 'help'];
+const listed = ['status', 'search', 'check', 'try', 'sync', 'on', 'off', 'help'];
 const fullUsage = `vsf memory <command>\n${listed.map((c) => `  ${c.padEnd(8)}${usages[c]!.split('\n')[1]!.trim()}`).join('\n')}`;
 
 // Parses a command's flags. Returns the result, or an exit code after
@@ -251,6 +253,19 @@ const memory: Tool = {
             : { name: sname, status: 'warn', detail: 'memory skill missing', fix: 'vsf setup memory' },
       );
     }
+    if (existsSync(join(saved.vault, '.git'))) {
+      const remote = spawnSync('git', ['remote', 'get-url', 'origin'], { cwd: saved.vault, encoding: 'utf8' });
+      const last = readLastSync(ctx.configDir);
+      checks.push(
+        remote.status !== 0
+          ? { name: 'memory sync', status: 'ok', detail: 'this machine only (add a git remote named origin to share the vault)' }
+          : !last
+            ? { name: 'memory sync', status: 'warn', detail: 'never synced', fix: 'vsf memory sync' }
+            : last.ok
+              ? { name: 'memory sync', status: 'ok', detail: `last synced ${last.at.slice(0, 16).replace('T', ' ')} UTC` }
+              : { name: 'memory sync', status: 'warn', detail: `last sync failed: ${(last.message ?? '').slice(0, 120)}`, fix: 'vsf memory sync' },
+      );
+    }
     return checks;
   },
 
@@ -296,6 +311,11 @@ const memory: Tool = {
         const input = JSON.parse(readFileSync(0, 'utf8')) as { prompt?: string; session_id?: string };
         const context = recallContext(saved.vault, input.prompt ?? '', input.session_id ?? 'none');
         if (context) process.stdout.write(hookOutput(context));
+        // Notes written in earlier prompts reach the remote without a timer:
+        // a stale vault syncs in the background, never delaying the prompt.
+        if (existsSync(join(saved.vault, '.git')) && isStale(ctx.configDir, 10)) {
+          spawn(ctx.selfCommand[0]!, [...ctx.selfCommand.slice(1), 'memory', 'sync', '--quiet'], { detached: true, stdio: 'ignore' }).unref();
+        }
       } catch {
         // no context
       }
@@ -319,6 +339,34 @@ const memory: Tool = {
       if (!found.length) ctx.log('No notes match.');
       for (const m of found) ctx.log(`${m.title}\n  ${tilde(join(saved.vault, m.path))}`);
       return 0;
+    },
+
+    async sync(args, ctx) {
+      const p = parse('sync', args, ctx, { ...JSON_FLAG, quiet: { type: 'boolean' }, 'if-stale': { type: 'string' } });
+      if (typeof p === 'number') return p;
+      const saved = readMemoryConfig(ctx.configDir);
+      if (!saved || !isVault(saved.vault)) return p.values.quiet ? 0 : notSetUp(ctx);
+      const stale = p.values['if-stale'] as string | undefined;
+      if (stale !== undefined) {
+        const minutes = Number(stale);
+        if (!Number.isFinite(minutes) || minutes < 0) {
+          ctx.log(usages.sync!);
+          return 2;
+        }
+        if (!isStale(ctx.configDir, minutes)) return 0;
+      }
+      try {
+        const r = syncVault(saved.vault);
+        if (!r.skipped) writeLastSync(ctx.configDir, true, r.conflicts.length ? describeSync(r) : undefined);
+        if (p.values.json) ctx.log(JSON.stringify(r, null, 2));
+        else if (!p.values.quiet || r.conflicts.length) ctx.log(describeSync(r));
+        return 0;
+      } catch (err) {
+        const message = (err as Error).message;
+        writeLastSync(ctx.configDir, false, message);
+        ctx.log(`Sync failed: ${message}`);
+        return 1;
+      }
     },
 
     async status(args, ctx) {
