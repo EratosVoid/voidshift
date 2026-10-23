@@ -4,7 +4,7 @@ import { chmodSync, mkdtempSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { keyStore, readSecret, readSecretsFile, removeSecret, secretsPath, storeSecret, writeSecretsFile } from '../src/secrets.ts';
-import { parseExecStart, quote, serviceUnit, timerUnit, unquote } from '../src/systemd.ts';
+import { parseExecStart, quote, serviceUnit, sudoCheck, timerUnit, unquote } from '../src/systemd.ts';
 
 const scratch = () => mkdtempSync(join(tmpdir(), 'vsf-linux-'));
 
@@ -57,4 +57,15 @@ test('a name with digits is stored, and removeSecret drops only its own key', ()
   assert.ok(removeSecret(dir, 'discord-build-2', 'linux'));
   assert.deepEqual(readSecretsFile(secretsPath(dir)), { linear: 'lin_api_abc' });
   assert.equal(statSync(secretsPath(dir)).mode & 0o777, 0o600);
+});
+
+test('doctor fails for root and warns when the runner user has sudo', () => {
+  const fake = (groups: string, sudo: number) =>
+    ((cmd: string) => (cmd === 'id' ? { status: 0, stdout: `${groups}\n` } : { status: sudo, stdout: '' })) as unknown as Parameters<typeof sudoCheck>[0];
+  assert.equal(sudoCheck(fake('root', 0), 0).status, 'fail');
+  assert.match(sudoCheck(fake('root', 0), 0).detail, /root/);
+  assert.equal(sudoCheck(fake('vsf sudo', 1), 1000).status, 'warn');
+  assert.equal(sudoCheck(fake('vsf wheel', 1), 1000).status, 'warn');
+  assert.equal(sudoCheck(fake('vsf', 0), 1000).status, 'warn', 'NOPASSWD sudo without an admin group');
+  assert.equal(sudoCheck(fake('vsf docker', 1), 1000).status, 'ok');
 });

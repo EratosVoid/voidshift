@@ -31,7 +31,13 @@ import { acquireWorkspace, clearCurrent, heldByOther, isPaused, liveRuns, readCu
 
 const stamp = () => new Date().toISOString().replace(/[:.]/g, '-');
 
-class Park extends Error {}
+class Park extends Error {
+  readonly kind: 'parked' | 'failed';
+  constructor(message: string, kind: 'parked' | 'failed' = 'parked') {
+    super(message);
+    this.kind = kind;
+  }
+}
 
 export interface RunContext {
   configDir: string;
@@ -44,6 +50,8 @@ export interface RunContext {
   // their own failures; a throw is logged and never changes the outcome.
   notify?: (event: RunEvent) => Promise<void>;
   summary?: (paused: boolean) => Promise<void>;
+  // Where agents run; on Linux they run with permissions skipped.
+  platform?: NodeJS.Platform;
 }
 
 function withLabels(card: Card, drop: (l: string) => boolean, add: string[]): string[] {
@@ -56,7 +64,9 @@ const UNATTENDED = `# Running unattended
 You are one step in a workflow. Nobody can answer questions and the
 tracker connection is not available: the card and any plan are included above.
 Do not write plan files; return your output as your final message. Make the
-call the code supports and state it.`;
+call the code supports and state it. If the environment stops you (a missing
+command, denied access, no network), name the command and the error in your
+final message, and in a Plan or Dev step end with \`RESULT: BLOCKED\`.`;
 
 // Agents keep the memory vault the way you do: durable learnings become notes.
 const memoryNote = (vault: string) => `# Memory
@@ -217,6 +227,18 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
     let logs = 0;
     const planText = () => plan ?? '(No plan was posted on this card. Check the work against the card itself.)';
     const logFile = (name: string) => join(runDir, `${String(logs++).padStart(2, '0')}-${name}.log`);
+    // Every agent step goes through here. A read step's stray edits are thrown
+    // away, so a later Dev step never commits them, and an agent process that
+    // fails ends the run as failed with its own error.
+    async function agent(def: ResolvedStep, rec: StepRecord, log: string, prompt: string) {
+      const r = await runAgent({ engine: def.engine, model: def.model, cwd: worktree, vault, settingsFile, write: def.write, logFile: log, timeoutMs: def.timeoutMs, platform: rc.platform, prompt });
+      if (!def.write || def.builtin === 'vs-qa') resetWorktree(worktree);
+      if (!r.ok) {
+        end(rec, 'failed', r.output, log);
+        throw new Park(`The ${def.label} step failed: ${r.error}. Log: ${basename(log)}`, 'failed');
+      }
+      return r;
+    }
 
     async function check(def: ResolvedStep, round: number): Promise<StepResult> {
       const label = def.label;
@@ -250,11 +272,7 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
         }
       }
       const log = logFile(def.id);
-      const r = await runAgent({
-        engine: def.engine, model: def.model, cwd: worktree, vault, settingsFile, write: def.write, logFile: log, timeoutMs: def.timeoutMs,
-        prompt: buildPrompt({ skill: def.prompt(), card, plan: planText(), base, round, extra: [known, ciNote, UNATTENDED].filter(Boolean).join('\n\n') }),
-      });
-      if (def.builtin === 'vs-qa') resetWorktree(worktree);
+      const r = await agent(def, rec, log, buildPrompt({ skill: def.prompt(), card, plan: planText(), base, round, extra: [known, ciNote, UNATTENDED].filter(Boolean).join('\n\n') }));
       const verdict = parseVerdict(r.output);
       end(rec, verdict, r.output, log);
       return { step: label, verdict, report: r.output };
@@ -304,10 +322,7 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
         await stage(stageOf(def), runs.plan + 1);
         const rec = begin(def);
         const log = logFile(def.builtin ? 'plan' : def.id);
-        const r = await runAgent({
-          engine: def.engine, model: def.model, cwd: worktree, vault, settingsFile, write: def.write, logFile: log, timeoutMs: def.timeoutMs,
-          prompt: buildPrompt({ skill: def.prompt(), card, plan: plan ?? '(none yet, you are writing it)', base, round: runs.plan + 1, findings: findings.get(i), extra: [known, UNATTENDED].filter(Boolean).join('\n\n') }),
-        });
+        const r = await agent(def, rec, log, buildPrompt({ skill: def.prompt(), card, plan: plan ?? '(none yet, you are writing it)', base, round: runs.plan + 1, findings: findings.get(i), extra: [known, UNATTENDED].filter(Boolean).join('\n\n') }));
         const result = parseDevResult(r.output);
         end(rec, result.status === 'blocked' ? 'blocked' : 'done', r.output, log);
         if (result.status === 'blocked') throw new Park(`The plan agent stopped: ${result.reason}`);
@@ -326,10 +341,7 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
         const rec = begin(def);
         const log = logFile(def.builtin ? 'dev' : def.id);
         const before = headSha(worktree);
-        const dev = await runAgent({
-          engine: def.engine, model: def.model, cwd: worktree, vault, settingsFile, write: def.write, logFile: log, timeoutMs: def.timeoutMs,
-          prompt: buildPrompt({ skill: def.prompt(), card, plan: planText(), base, round: runs.dev + 1, findings: findings.get(i), extra: [known, UNATTENDED].filter(Boolean).join('\n\n') }),
-        });
+        const dev = await agent(def, rec, log, buildPrompt({ skill: def.prompt(), card, plan: planText(), base, round: runs.dev + 1, findings: findings.get(i), extra: [known, UNATTENDED].filter(Boolean).join('\n\n') }));
         const result = parseDevResult(dev.output);
         end(rec, result.status === 'blocked' ? 'blocked' : 'done', dev.output, log);
         if (result.status === 'blocked') throw new Park(`The dev agent stopped: ${result.reason}`);
@@ -350,12 +362,8 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
         await stage(stageOf(def), loops || undefined);
         const rec = begin(def);
         const log = logFile(def.id);
-        const r = await runAgent({
-          engine: def.engine, model: def.model, cwd: worktree, vault, settingsFile, write: def.write, logFile: log, timeoutMs: def.timeoutMs,
-          prompt: buildPrompt({ skill: def.prompt(), card, plan: plan ?? '(none)', base, round: loops || 1, extra: [known, UNATTENDED].filter(Boolean).join('\n\n') }),
-        });
-        end(rec, r.ok ? 'done' : 'failed', r.output, log);
-        if (!r.ok) throw new Park(`The ${def.label} step failed or timed out.`);
+        const r = await agent(def, rec, log, buildPrompt({ skill: def.prompt(), card, plan: plan ?? '(none)', base, round: loops || 1, extra: [known, UNATTENDED].filter(Boolean).join('\n\n') }));
+        end(rec, 'done', r.output, log);
       }
       findings.delete(i);
       i++;
@@ -373,7 +381,7 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
     say('verified');
     done('verified');
   } catch (err) {
-    if (err instanceof Park) return park(err.message);
+    if (err instanceof Park) return park(err.message, err.kind);
     return park(`Something went wrong: ${(err as Error).message}`, 'failed');
   } finally {
     active = null;

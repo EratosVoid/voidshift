@@ -182,6 +182,14 @@ DCO. Only the new commits of that step are rewritten, never pushed ones.
 - **Your config** lives in `~/.config/voidshift`.
 - **Linux.** The runner is a systemd user timer. Run
   `sudo loginctl enable-linger $USER` so it keeps going after you log out.
+  Agents there run with permissions skipped (`--dangerously-skip-permissions`
+  for Claude, `--dangerously-bypass-approvals-and-sandbox` for Codex), so no
+  step ever waits on a prompt and the runner's user account is the boundary.
+  Run it as a dedicated user with no sudo that holds only the keys it needs,
+  never as root, and enable lingering for it from an admin account
+  (`sudo loginctl enable-linger <user>`). `vsf doctor` warns when the runner
+  user has sudo. A step that fails shows its error in the run log, on the card
+  and in Discord.
 
 ```sh
 vsf doctor                     # check everything is set up, and whether an update is out
