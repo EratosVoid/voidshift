@@ -42,17 +42,16 @@ export function readClaudeToken(o: TokenSource = {}): { token: string } | { erro
   return { token: oauth.accessToken };
 }
 
-// Percent used, whether the answer is on a 0 to 1 or a 0 to 100 scale.
-export const toPercent = (v: number) => (v > 0 && v < 1 ? v * 100 : v);
-
 export async function fetchWindow(token: string, fetcher: typeof fetch = fetch): Promise<Pick<Window, 'utilization' | 'resetsAt'>> {
   const res = await fetcher(USAGE_URL, { headers: { Authorization: `Bearer ${token}`, 'anthropic-beta': 'oauth-2025-04-20' }, signal: AbortSignal.timeout(10_000) });
   if (!res.ok) throw new Error(`the usage endpoint answered ${res.status}`);
   const five = ((await res.json()) as { five_hour?: { utilization?: unknown; resets_at?: unknown } } | null)?.five_hour;
+  // Percent used, 0 to 100, as Claude's /usage shows it. A value under 1 is
+  // under 1%, not a fraction: reading it as one would hold runs at a reset.
   const u = typeof five?.utilization === 'number' ? five.utilization : NaN;
   if (!Number.isFinite(u)) throw new Error('the answer had no 5 hour window');
   const resets = typeof five?.resets_at === 'string' ? new Date(five.resets_at) : null;
-  return { utilization: toPercent(u), ...(resets && !isNaN(resets.getTime()) ? { resetsAt: resets.toISOString() } : {}) };
+  return { utilization: u, ...(resets && !isNaN(resets.getTime()) ? { resetsAt: resets.toISOString() } : {}) };
 }
 
 // A reading is stale after 5 minutes, or once its window has reset.

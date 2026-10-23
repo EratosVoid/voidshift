@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readWindow, writeWindow, addUsage } from '../src/state.ts';
-import { readClaudeToken, refreshWindow, toPercent, windowHold, windowLine, windowStale } from '../src/usage.ts';
+import { readClaudeToken, refreshWindow, windowHold, windowLine, windowStale } from '../src/usage.ts';
 
 const NOW = new Date('2026-10-23T12:00:00.000Z');
 const later = (min: number) => new Date(NOW.getTime() + min * 60_000).toISOString();
@@ -18,17 +18,15 @@ test('the hold starts at pauseAt, not below it, and never with 0', () => {
   assert.equal(windowHold(null, 90, NOW), null);
 });
 
-test('utilization reads on a 0 to 1 and a 0 to 100 scale', async () => {
-  assert.equal(toPercent(0.62), 62);
-  assert.equal(toPercent(62), 62);
-  assert.equal(toPercent(0), 0);
-  for (const utilization of [0.91, 91]) {
+test('utilization is a percent, so a value under 1 is under 1% and never holds', async () => {
+  for (const [utilization, held] of [[0.95, false], [46, false], [91, true]] as const) {
     const dir = mkdtempSync(join(tmpdir(), 'vsf-usage-'));
     const fetcher = (async () => new Response(JSON.stringify({ five_hour: { utilization, resets_at: later(60) } }))) as typeof fetch;
     const w = await refreshWindow(dir, fetcher, () => ({ token: 't' }), NOW);
-    assert.equal(Math.round(w.utilization!), 91);
+    assert.equal(w.utilization, utilization);
     assert.equal(w.resetsAt, later(60));
     assert.deepEqual(readWindow(dir), w);
+    assert.equal(!!windowHold(w, 90, NOW), held);
   }
 });
 
