@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { cancelCurrent, countRounds, isInterrupted, formatRunLine, parseAge, parsePlistArgs, scanRunnerErrors } from '../src/control.ts';
+import { cancelCurrent, countRounds, isInterrupted, formatRunLine, parseAge, parsePlistArgs, scanRunnerErrors, trackerWarnings, workingLine } from '../src/control.ts';
+import type { Tracker, Trackers } from '../src/tracker.ts';
 import { lockPath, writeCurrent, type RunEntry } from '../src/state.ts';
 import type { ToolContext } from '../src/types.ts';
 
@@ -130,4 +131,21 @@ test('parsePlistArgs reads ProgramArguments only', () => {
 </dict>`;
   assert.deepEqual(parsePlistArgs(plist), ['/usr/local/bin/node', '/a/b & c/cli.ts', 'agents']);
   assert.deepEqual(parsePlistArgs('<dict></dict>'), []);
+});
+
+test('status shows the round the lock holds, as the card label does', () => {
+  const current = { pid: 1, card: 'ORG-1', workflow: 'build', step: 'Dev', round: 2, elapsedMinutes: 3 };
+  assert.equal(workingLine(current), ' Working on ORG-1 (build, Dev, round 2, 3m).');
+  assert.equal(workingLine({ ...current, step: 'Starting', round: 0 }), ' Working on ORG-1 (build, Starting, 3m).');
+});
+
+test('a missing tracker key is a warning naming the key', async () => {
+  const missing = 'No VoidTrack API key. Run vsf agents key --voidtrack';
+  const trackers: Trackers = (kind) => ({
+    viewer: async () => {
+      if (kind === 'voidtrack') throw new Error(missing);
+      return { id: 'u1', name: 'Me' };
+    },
+  }) as unknown as Tracker;
+  assert.deepEqual(await trackerWarnings(['linear', 'voidtrack'], trackers), [{ kind: 'voidtrack', message: missing }]);
 });

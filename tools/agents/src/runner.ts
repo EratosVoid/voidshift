@@ -8,6 +8,7 @@ import {
   fixTarget,
   isStatusLabel,
   latestPlan,
+  needsPlan,
   parseDevResult,
   parseVerdict,
   planBody,
@@ -167,10 +168,7 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
     if (from < 0) throw new Park(`Workflow ${workflowName} has no ${stepIdLabel(opts.from!)} step.`);
     // A scheduled run has no card to plan on, so its task is the plan unless a Plan step writes one.
     let plan = isCardTrigger(trigger) ? latestPlan(await linear.comments(card.identifier)) : card.description ?? null;
-    const firstPlan = steps.findIndex((d, n) => n >= from && d.output === 'plan');
-    // A check before any commits is a check on the plan, like Plan review.
-    const needsPlan = steps.findIndex((d, n) => n >= from && (d.output === 'commits' || (d.output === 'verdict' && d.builtin !== 'vs-qa')));
-    if (!plan && needsPlan >= 0 && (firstPlan < 0 || firstPlan > needsPlan)) {
+    if (!plan && needsPlan(steps, from)) {
       throw new Park('No plan comment (starting with "## Plan") was found. Publish a plan first, or start the workflow with Plan.');
     }
 

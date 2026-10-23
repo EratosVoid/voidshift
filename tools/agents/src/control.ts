@@ -247,21 +247,29 @@ const realDeps = (ctx: ToolContext): CancelDeps => ({
   },
 });
 
-async function startCmd(ctx: ToolContext): Promise<number> {
-  if (!Object.keys(readAgentsConfig(ctx.configDir).workflows).length) {
-    ctx.log('No workflows yet. Create one first: vsf agents workflow add.');
-    return 1;
-  }
-  const trackers = trackersFor(ctx.configDir);
-  for (const kind of trackersInUse(readAgentsConfig(ctx.configDir))) {
+// One message per tracker whose key is missing or refused. The tick skips a
+// tracker it cannot open, so these warn rather than stop the runner.
+export async function trackerWarnings(kinds: Kind[], trackers: Trackers): Promise<{ kind: Kind; message: string }[]> {
+  const out: { kind: Kind; message: string }[] = [];
+  for (const kind of kinds) {
     try {
       await trackers(kind).viewer();
     } catch (err) {
       const msg = (err as Error).message;
       const flag = kind === 'linear' ? '' : ` --${kind}`;
-      ctx.log(/^No .* API key/.test(msg) ? msg : `${TRACKERS[kind].name} did not accept the key: ${msg}. Run vsf agents key${flag}.`);
-      return 1;
+      out.push({ kind, message: /^No .* API key/.test(msg) ? msg : `${TRACKERS[kind].name} did not accept the key: ${msg}. Run vsf agents key${flag}.` });
     }
+  }
+  return out;
+}
+
+async function startCmd(ctx: ToolContext): Promise<number> {
+  if (!Object.keys(readAgentsConfig(ctx.configDir).workflows).length) {
+    ctx.log('No workflows yet. Create one first: vsf agents workflow add.');
+    return 1;
+  }
+  for (const w of await trackerWarnings(trackersInUse(readAgentsConfig(ctx.configDir)), trackersFor(ctx.configDir))) {
+    ctx.log(`Warning: ${w.message.replace(/\.?$/, '.')} Workflows on ${TRACKERS[w.kind].name} are skipped until then.`);
   }
   setPaused(ctx.configDir, false);
   if (!runnerService().start(ctx.home, program(ctx), logPath(ctx.configDir))) {
@@ -278,6 +286,13 @@ async function stopCmd(ctx: ToolContext): Promise<number> {
   if (c) await cancelCurrent(ctx, c, realDeps(ctx));
   ctx.log('Runner stopped.');
   return 0;
+}
+
+// The lock holds the round as the card's vs-vN label shows it; 0 before any round.
+export function workingLine(current: (Current & { elapsedMinutes: number }) | null): string {
+  if (!current) return '';
+  if (!current.card) return ' Checking now.';
+  return ` Working on ${current.card}${current.title ? ` "${current.title}"` : ''} (${[current.workflow, current.step, current.round ? `round ${current.round}` : '', `${current.elapsedMinutes}m`].filter(Boolean).join(', ')}).`;
 }
 
 const status = guard(async (args, ctx) => {
@@ -304,11 +319,7 @@ const status = guard(async (args, ctx) => {
     ctx.log(JSON.stringify({ engine: config.engine, runner, lastTick, current, parked, interrupted, workflows, projects }, null, 2));
     return 0;
   }
-  const working = current && !current.card
-    ? ' Checking now.'
-    : current
-    ? ` Working on ${current.card ?? 'a card'}${current.title ? ` "${current.title}"` : ''} (${[current.workflow, current.step, current.round !== undefined ? `round ${current.round + 1}` : '', `${current.elapsedMinutes}m`].filter(Boolean).join(', ')}).`
-    : '';
+  const working = workingLine(current);
   if (runner === 'running') ctx.log(`Runner: running.${working}`);
   else if (runner === 'paused') ctx.log(`Runner: paused, picks up no new cards. vsf agents resume to continue.${working}`);
   else ctx.log('Runner: stopped. vsf agents start to begin.');

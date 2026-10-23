@@ -12,7 +12,7 @@ export interface Current {
   workflow?: string;
   // Label of the step running now, e.g. "Dev".
   step?: string;
-  // Times the work has been sent back so far.
+  // The round now running, 1-based like the card's vs-vN label; 0 before the first.
   round?: number;
   startedAt?: string;
   runDir?: string;

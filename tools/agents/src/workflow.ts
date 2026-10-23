@@ -133,6 +133,19 @@ export function fixTarget<T>(steps: T[], blockStart: number, isProducer: (s: T) 
   return -1;
 }
 
+// Whether a run starting at `from` needs a plan comment: some step before any
+// Plan step writes commits or checks the plan. A check counts as a plan check
+// only when a Plan step comes before it, so a review-only workflow runs bare.
+export function needsPlan(steps: { output: string; builtin?: string }[], from: number): boolean {
+  for (let n = from; n < steps.length; n++) {
+    const s = steps[n]!;
+    if (s.output === 'plan') return false;
+    if (s.output === 'commits') return true;
+    if (s.output === 'verdict' && s.builtin !== 'vs-qa' && (s.builtin === 'vs-plan-review' || steps.slice(0, n).some((d) => d.output === 'plan'))) return true;
+  }
+  return false;
+}
+
 // Plan output minus the trailing RESULT line, ready to post.
 export function planBody(output: string): string {
   return output.replace(/^\s*RESULT:.*$/gim, '').trim();

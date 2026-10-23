@@ -94,7 +94,9 @@ The plan file holds the detail. In the chat, keep it short and plain:
 Start straight at Understanding. Do not repeat the card id or title; the card
 already shows them.
 
-Length follows the change: under 350 words for a small one, never padded.
+Outcome first. Under 350 words for a small change, never over 700 for any
+change. File and line detail only in Surfaces; no code blocks over 5 lines;
+Six angles lists only angles that apply.
 
 **Understanding.** Two to four sentences: what the card asks, what it got
 wrong, which reading you chose.
@@ -123,6 +125,7 @@ anything a human must click.
 - No ticket ids in code comments.
 - No em dashes or en dashes.
 - No narration of process. State findings.
+- Do not quote code the dev agent can read.
 
 ## When you run inside a workflow
 

@@ -96,7 +96,7 @@ test('prompt inlines the skill body without frontmatter', () => {
   assert.doesNotMatch(p, /name: vs-dev/);
 });
 
-import { fixTarget, planBody, verdictBlock } from '../src/workflow.ts';
+import { fixTarget, needsPlan, planBody, verdictBlock } from '../src/workflow.ts';
 
 const steps = ['vs-plan', 'vs-plan-review', 'vs-dev', 'ci', 'vs-qa-review'];
 const verdict = (s: string) => ['vs-plan-review', 'ci', 'vs-qa-review'].includes(s);
@@ -115,4 +115,15 @@ test('a failed check goes back to the nearest producer', () => {
 
 test('plan body drops the RESULT line', () => {
   assert.equal(planBody('**Understanding.** x\n\nRESULT: DONE'), '**Understanding.** x');
+});
+
+test('a custom check needs a plan only when a Plan step comes before it', () => {
+  const plan = { output: 'plan', builtin: 'vs-plan' };
+  const custom = { output: 'verdict' };
+  assert.equal(needsPlan([custom], 0), false);
+  assert.equal(needsPlan([plan, custom], 1), true);
+  assert.equal(needsPlan([plan, custom], 0), false);
+  assert.equal(needsPlan([{ output: 'commits', builtin: 'vs-dev' }, { output: 'verdict', builtin: 'vs-qa' }], 0), true);
+  assert.equal(needsPlan([{ output: 'verdict', builtin: 'vs-plan-review' }], 0), true);
+  assert.equal(needsPlan([custom, { output: 'verdict', builtin: 'vs-qa' }], 0), false);
 });
