@@ -41,7 +41,7 @@
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test test/*.test.ts",
+    "test": "node --test --test-force-exit --test-timeout=60000 test/*.test.ts",
     "prepublishOnly": "rm -rf dist && tsc -p tsconfig.json"
   },
   "devDependencies": {

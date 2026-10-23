@@ -8,6 +8,8 @@ on:
 jobs:
   check:
     runs-on: macos-latest
+    # A hung test must fail fast, not hold a runner for six hours.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
