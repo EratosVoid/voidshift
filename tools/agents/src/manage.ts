@@ -1,12 +1,52 @@
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
-import { AGENTS, STEPS, describeTrigger, triggerSpec, type AgentsConfig, type StepId, type Trigger, type Workflow } from './config.ts';
+import { existsSync, readFileSync } from 'node:fs';
+import { basename, join, resolve } from 'node:path';
+import { AGENTS, AGENT_FILE, OUTPUTS, STEP_ID, isBuiltin, readAgentFolder, stepFile, type AgentsConfig, type Step, type StepDef, type StepId, type Trigger, type Workflow, describeTrigger, triggerSpec } from './config.ts';
 import { parseCron } from './cron.ts';
 
 const isInt = (v: unknown, min: number, max: number) => typeof v === 'number' && Number.isInteger(v) && v >= min && v <= max;
 
+// The line a step's prompt must ask for, so the runner can read the result.
+const RESULT_LINE: Partial<Record<StepDef['output'], string>> = { plan: 'RESULT:', commits: 'RESULT:', verdict: 'VERDICT:' };
+
+// Everything wrong with one step. `dir` is the agent folder its files are in.
+export function validateStep(step: Step, config: Pick<AgentsConfig, 'enabled'>, dir?: string): string[] {
+  if (typeof step === 'string') {
+    if (!isBuiltin(step)) return [`Unknown step ${step}.`];
+    return config.enabled.length && !config.enabled.includes(step) ? [`Step ${step} is not enabled.`] : [];
+  }
+  if (!isObj(step)) return ['A step must be a step id or an object.'];
+  const problems: string[] = [];
+  const id = typeof step.id === 'string' && STEP_ID.test(step.id) ? step.id : null;
+  if (!id) problems.push(`Step id ${String(step.id)} must be lowercase letters, digits and dashes.`);
+  else if (isBuiltin(id)) problems.push(`Step id ${id} is a built-in step; use "${id}" on its own, or another id.`);
+  const name = id ?? 'A step';
+  if (!OUTPUTS.includes(step.output)) problems.push(`${name} output must be one of: ${OUTPUTS.join(', ')}.`);
+  if (step.label !== undefined && typeof step.label !== 'string') problems.push(`${name} label must be text.`);
+  if (step.prompt !== undefined && typeof step.prompt !== 'string') problems.push(`${name} prompt must be a file name.`);
+  if (step.skill !== undefined && typeof step.skill !== 'string') problems.push(`${name} skill must be a name or a folder.`);
+  const sources = [step.skill, step.prompt].filter((v) => v !== undefined).length;
+  if (step.output === 'publish') {
+    if (sources) problems.push(`${name} only pushes the branch, so it takes no skill or prompt.`);
+  } else if (sources !== 1) problems.push(`${name} needs exactly one of skill or prompt.`);
+  else if (typeof (step.prompt ?? step.skill) === 'string') {
+    const file = stepFile(step, dir);
+    if (!file || !existsSync(file)) problems.push(`${name} ${step.prompt ? 'prompt' : 'skill'} ${file ?? ''} does not exist.`);
+    else {
+      const want = RESULT_LINE[step.output];
+      if (want && !readFileSync(file, 'utf8').includes(want)) problems.push(`${name} prompt never asks for a ${want} line.`);
+    }
+  }
+  if (step.engine !== undefined && step.engine !== 'claude' && step.engine !== 'codex') problems.push(`${name} engine must be claude or codex.`);
+  if (step.model !== undefined && typeof step.model !== 'string') problems.push(`${name} model must be text.`);
+  if (step.timeoutMinutes !== undefined && !isInt(step.timeoutMinutes, 1, 480)) problems.push(`${name} timeoutMinutes must be a whole number from 1 to 480.`);
+  if (step.write !== undefined && typeof step.write !== 'boolean') problems.push(`${name} write must be true or false.`);
+  else if (step.write === false && step.output === 'commits') problems.push(`${name} makes commits, so write cannot be false.`);
+  return problems;
+}
+
 // Everything wrong with one workflow, in plain words. Empty means it is fine.
-export function validateWorkflow(config: Pick<AgentsConfig, 'enabled' | 'projects'>, workflow: Workflow): string[] {
+// `dir` is the agent folder a folder workflow comes from.
+export function validateWorkflow(config: Pick<AgentsConfig, 'enabled' | 'projects'>, workflow: Workflow, dir?: string): string[] {
   const problems: string[] = [];
   if (!workflow.triggers?.length) problems.push('Needs at least one trigger.');
   for (const t of workflow.triggers ?? []) {
@@ -20,12 +60,42 @@ export function validateWorkflow(config: Pick<AgentsConfig, 'enabled' | 'project
     }
   }
   if (!workflow.steps?.length) problems.push('Needs at least one step.');
-  for (const s of workflow.steps ?? []) {
-    if (!(s in STEPS)) problems.push(`Unknown step ${s}.`);
-    else if (config.enabled.length && !config.enabled.includes(s)) problems.push(`Step ${s} is not enabled.`);
+  const ids = new Set<string>();
+  for (const s of Array.isArray(workflow.steps) ? workflow.steps : []) {
+    problems.push(...validateStep(s, config, dir));
+    const id = typeof s === 'string' ? s : isObj(s) ? s.id : undefined;
+    if (typeof id === 'string' && !isBuiltin(id)) {
+      if (ids.has(id)) problems.push(`Step id ${id} is used twice.`);
+      ids.add(id);
+    }
   }
   if (!config.projects[workflow.project]) problems.push(`Project ${workflow.project} does not exist.`);
   if (!isInt(workflow.maxRounds, 1, 9)) problems.push('Rounds must be a whole number from 1 to 9.');
+  const wb = workflow.writeBack;
+  if (wb !== undefined) {
+    if (!isObj(wb)) problems.push('writeBack must be an object.');
+    else {
+      if (wb.labels !== undefined && typeof wb.labels !== 'boolean') problems.push('writeBack.labels must be true or false.');
+      if (wb.comment !== undefined && typeof wb.comment !== 'boolean') problems.push('writeBack.comment must be true or false.');
+      if (wb.state !== undefined && wb.state !== null && (typeof wb.state !== 'string' || !wb.state.trim())) problems.push('writeBack.state must be a state name, or null to never move the card.');
+    }
+  }
+  return problems;
+}
+
+// Everything wrong with an agent folder: its agent.json, its workflow and
+// prompt files, and a name config.json already uses.
+export function validateAgentFolder(dir: string, config: Pick<AgentsConfig, 'enabled' | 'projects' | 'workflows' | 'folders'>): string[] {
+  let workflow: Workflow;
+  try {
+    workflow = readAgentFolder(dir);
+  } catch (err) {
+    return [`${AGENT_FILE}: ${(err as Error).message}`];
+  }
+  const problems = validateWorkflow(config, workflow, dir);
+  const name = basename(dir);
+  const from = config.folders?.[name];
+  if (config.workflows[name] && (!from || resolve(from) !== resolve(dir))) problems.push(`config.json already has a workflow named ${name}, and it wins. Rename the folder.`);
   return problems;
 }
 
@@ -113,6 +183,8 @@ export function validateConfig(value: unknown, saved?: Pick<AgentsConfig, 'proje
   else {
     const ctx = { enabled: Array.isArray(value.enabled) ? (value.enabled as StepId[]) : [], projects: (projects ?? {}) as AgentsConfig['projects'] };
     for (const [name, w] of Object.entries(value.workflows)) {
+      // Folder workflows are checked with their folder, by vsf agents validate.
+      if (isObj(value.folders) && value.folders[name]) continue;
       if (!isObj(w)) problems.push(`Workflow ${name} must be an object.`);
       else {
         // An unchanged workflow using a step that is not enabled is only a warning.

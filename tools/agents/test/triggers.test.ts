@@ -1,13 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { lastDue, matches, parseCron } from '../src/cron.ts';
 import { DEFAULTS, agentsDir, triggerSpec, type Trigger, type Workflow } from '../src/config.ts';
 import { parseTrigger, sameTrigger, validateWorkflow } from '../src/manage.ts';
 import { createVoidTrack, mapIssue } from '../src/voidtrack.ts';
-import { cronCard, nextJob, type RunContext } from '../src/runner.ts';
+import { cronCard, nextJob, runCard, tick, type RunContext } from '../src/runner.ts';
 import { readCronState } from '../src/state.ts';
 import type { Card } from '../src/linear.ts';
 import type { Tracker } from '../src/tracker.ts';
@@ -186,4 +187,182 @@ test('a scheduled run without a Plan step uses its task as the plan instead of p
   assert.equal(outcome, 'parked');
   assert.ok(logs.some((l) => /parked: .*git fetch/.test(l)), logs.join('\n'));
   assert.ok(!logs.some((l) => /No plan comment/.test(l)));
+});
+
+// A real repo with a bare origin, a fake `claude` that logs its argv and
+// stdin then runs behave.sh, and a fake `gh`, for runs that reach the agents.
+function agentRig(behave: string) {
+  const root = mkdtempSync(join(tmpdir(), 'vsf-rig-'));
+  const git = (args: string[], cwd: string) => spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { cwd, encoding: 'utf8' });
+  const origin = join(root, 'origin.git');
+  git(['init', '-q', '--bare', '-b', 'main', origin], root);
+  const repo = join(root, 'repo');
+  git(['clone', '-q', origin, repo], root);
+  git(['commit', '-q', '--allow-empty', '-m', 'init'], repo);
+  git(['push', '-q', 'origin', 'HEAD:main'], repo);
+  const bin = join(root, 'bin');
+  const fake = join(root, 'fake');
+  mkdirSync(bin);
+  mkdirSync(join(fake, 'calls'), { recursive: true });
+  writeFileSync(join(fake, 'behave.sh'), behave);
+  writeFileSync(join(bin, 'claude'), `#!/bin/sh
+n=$(ls "${fake}/calls" | wc -l | tr -d ' ')
+mkdir -p "${fake}/calls/$n"
+printf '%s\\n' "$@" > "${fake}/calls/$n/argv"
+cat > "${fake}/calls/$n/stdin"
+. "${fake}/behave.sh"
+`);
+  writeFileSync(join(bin, 'gh'), '#!/bin/sh\necho https://github.com/x/y/pull/1\n');
+  chmodSync(join(bin, 'claude'), 0o755);
+  chmodSync(join(bin, 'gh'), 0o755);
+  const defs = join(root, 'defs');
+  mkdirSync(defs);
+  const prompts: Record<string, string> = {
+    'brief.md': 'Write the morning brief.',
+    'plan.md': 'Write a custom plan.\nRESULT: DONE',
+    'check.md': 'Check the custom plan.\nVERDICT: SHIP',
+    'build.md': 'Build it the custom way.\nRESULT: DONE',
+  };
+  for (const [name, text] of Object.entries(prompts)) writeFileSync(join(defs, name), text);
+  const calls = () =>
+    readdirSync(join(fake, 'calls')).sort((a, b) => Number(a) - Number(b)).map((n) => ({
+      argv: readFileSync(join(fake, 'calls', n, 'argv'), 'utf8').split('\n'),
+      stdin: readFileSync(join(fake, 'calls', n, 'stdin'), 'utf8'),
+    }));
+  return { repo, bin, defs, calls };
+}
+
+// The fake agent commits a new file each time, then reports.
+const COMMIT = 'f=$(date +%s%N).txt; echo x > "$f"; git add "$f"; git -c user.name=t -c user.email=t@t commit -q -m work >/dev/null\n';
+
+async function withPath<T>(bin: string, fn: () => Promise<T>): Promise<T> {
+  const before = process.env.PATH;
+  process.env.PATH = `${bin}:${before}`;
+  try {
+    return await fn();
+  } finally {
+    process.env.PATH = before;
+  }
+}
+
+const cron: Trigger = { source: 'cron', schedule: '0 5 * * *', task: 'Brief me' };
+
+async function runCron(rig: ReturnType<typeof agentRig>, workflow: Workflow) {
+  const { rc, logs } = rcWith({ w: workflow }, {});
+  rc.selfCommand = [];
+  rc.config.projects.p = { path: rig.repo, base: 'main' };
+  rc.config.folders = { w: rig.defs };
+  const outcome = await withPath(rig.bin, () => runCard(cronCard('w', 'Brief me', new Date()), cron, 'w', workflow, rc.config.projects.p!, rc));
+  return { outcome, logs };
+}
+
+test('a custom one step prompt runs from cron with its own model, timeout and write access, and no tracker', async () => {
+  const rig = agentRig('echo brief written\n');
+  const { outcome, logs } = await runCron(rig, { triggers: [cron], steps: [{ id: 'brief', prompt: 'brief.md', output: 'none', model: 'haiku', timeoutMinutes: 5, write: true }], maxRounds: 1, project: 'p' });
+  assert.equal(outcome, 'verified', logs.join('\n'));
+  const [call] = rig.calls();
+  assert.match(call!.stdin, /Write the morning brief\./);
+  assert.match(call!.stdin, /Brief me/);
+  assert.equal(call!.argv[call!.argv.indexOf('--model') + 1], 'haiku');
+  assert.ok(call!.argv.includes('acceptEdits'), 'write access');
+  assert.equal(rig.calls().length, 1);
+});
+
+test('a custom step that fails parks the run', async () => {
+  const rig = agentRig('exit 3\n');
+  const { outcome, logs } = await runCron(rig, { triggers: [cron], steps: [{ id: 'brief', prompt: 'brief.md', output: 'none' }], maxRounds: 1, project: 'p' });
+  assert.equal(outcome, 'parked');
+  assert.ok(logs.some((l) => /The brief step failed or timed out/.test(l)), logs.join('\n'));
+  assert.ok(!rig.calls()[0]!.argv.includes('acceptEdits'), 'a none step is read only by default');
+});
+
+test('a custom verdict sends FIX back to a custom plan step until the rounds run out', async () => {
+  const rig = agentRig('echo "RESULT: DONE"; echo "VERDICT: FIX"\n');
+  const { outcome, logs } = await runCron(rig, {
+    triggers: [cron],
+    steps: [{ id: 'plan', prompt: 'plan.md', output: 'plan' }, { id: 'check', prompt: 'check.md', output: 'verdict' }],
+    maxRounds: 2,
+    project: 'p',
+  });
+  assert.equal(outcome, 'parked');
+  assert.ok(logs.some((l) => /Checks still failed after 2 plan rounds/.test(l)), logs.join('\n'));
+  assert.equal(rig.calls().filter((c) => c.stdin.includes('Write a custom plan.')).length, 2);
+  assert.equal(rig.calls().filter((c) => c.stdin.includes('Check the custom plan.')).length, 2);
+});
+
+test('a custom commits step gets write access by default and its commits count', async () => {
+  const rig = agentRig(`${COMMIT}echo "RESULT: DONE"\n`);
+  const { outcome, logs } = await runCron(rig, { triggers: [cron], steps: [{ id: 'build', prompt: 'build.md', output: 'commits' }], maxRounds: 1, project: 'p' });
+  assert.equal(outcome, 'verified', logs.join('\n'));
+  assert.ok(rig.calls()[0]!.argv.includes('acceptEdits'));
+  assert.ok(!logs.some((l) => /made no commits/.test(l)));
+});
+
+// A card run's tracker, recording every write.
+function cardRig(rig: ReturnType<typeof agentRig>, workflow: Workflow, comments: { body: string; createdAt: string }[] = []) {
+  const writes: string[] = [];
+  const tracker: Partial<Tracker> = {
+    card: async () => vtCard(['vs-start', 'keep']),
+    myCardsWithLabel: async () => [vtCard(['vs-start', 'keep'])],
+    comments: async () => comments,
+    comment: async (_c, body) => void writes.push(`comment:${body}`),
+    setLabels: async (c, next) => {
+      writes.push(`labels:${next.join(',')}`);
+      c.labels = next;
+    },
+    moveTo: async (_c, state) => {
+      writes.push(`move:${state}`);
+      return true;
+    },
+  };
+  const { rc, logs } = rcWith({ w: workflow }, { voidtrack: tracker });
+  rc.selfCommand = [];
+  rc.config.projects.p = { path: rig.repo, base: 'main' };
+  rc.config.folders = { w: rig.defs };
+  const trigger = workflow.triggers[0]!;
+  const run = (card = vtCard(['vs-start', 'keep'])) => withPath(rig.bin, () => runCard(card, trigger, 'w', workflow, rc.config.projects.p!, rc));
+  return { rc, logs, writes, run };
+}
+
+const vtTrigger: Trigger = { source: 'voidtrack', team: 'ORG', label: 'vs-start' };
+
+test('a custom plan step before Dev means no plan comment is needed', async () => {
+  const rig = agentRig(`${COMMIT}echo "RESULT: DONE"\n`);
+  const { logs, run } = cardRig(rig, { triggers: [vtTrigger], steps: [{ id: 'plan', prompt: 'plan.md', output: 'plan' }, 'vs-dev'], maxRounds: 1, project: 'p' });
+  const outcome = await run();
+  assert.ok(!logs.some((l) => /No plan comment/.test(l)), logs.join('\n'));
+  assert.equal(outcome, 'verified', logs.join('\n'));
+});
+
+test('writeBack: labels off, a fixed state and no closing comment', async () => {
+  const rig = agentRig('echo done\n');
+  const { writes, logs, run } = cardRig(rig, {
+    triggers: [vtTrigger],
+    steps: [{ id: 'brief', prompt: 'brief.md', output: 'none' }],
+    maxRounds: 1,
+    project: 'p',
+    writeBack: { labels: false, state: 'Done', comment: false },
+  });
+  assert.equal(await run(), 'verified', logs.join('\n'));
+  assert.deepEqual(writes, ['move:Done', 'labels:keep']);
+});
+
+test('writeBack.state null never moves the card', async () => {
+  const rig = agentRig(`${COMMIT}echo "RESULT: DONE"\n`);
+  const { writes, logs, run } = cardRig(rig, { triggers: [vtTrigger], steps: ['vs-dev'], maxRounds: 1, project: 'p', writeBack: { state: null } }, [{ body: '## Plan\n\nDo it.', createdAt: '2026-10-23T00:00:00Z' }]);
+  assert.equal(await run(), 'verified', logs.join('\n'));
+  assert.ok(!writes.some((w) => w.startsWith('move:')), writes.join('\n'));
+  assert.ok(writes.some((w) => w.startsWith('comment:**All checks passed.**')));
+});
+
+test('--from a custom step on a card picked by its trigger', async () => {
+  const rig = agentRig('echo done\n');
+  const workflow: Workflow = { triggers: [vtTrigger], steps: [{ id: 'first', prompt: 'plan.md', output: 'none' }, { id: 'brief', prompt: 'brief.md', output: 'none' }], maxRounds: 1, project: 'p' };
+  const { rc, logs } = cardRig(rig, workflow);
+  assert.equal(await withPath(rig.bin, () => tick(rc, 'ORG-1', { from: 'x' })), 2);
+  assert.ok(logs.includes('Workflow w has no x step'.concat('.')), logs.join('\n'));
+  assert.equal(rig.calls().length, 0);
+  assert.equal(await withPath(rig.bin, () => tick(rc, 'ORG-1', { from: 'brief' })), 0, logs.join('\n'));
+  assert.equal(rig.calls().length, 1);
+  assert.match(rig.calls()[0]!.stdin, /Write the morning brief\./);
 });

@@ -4,7 +4,7 @@ import { homedir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { AGENTS, STEPS, TEMPLATES, isProducer, agentsDir, describeSteps, describeTrigger, describeTriggers, describeWorkflow, stepEnabled, visibleAgents, readAgentsConfig, writeAgentsConfig, DEFAULTS, type AgentsConfig, type Project, type StepId, type Trigger, type Workflow } from './config.ts';
+import { AGENTS, AGENT_FILE, STEPS, TEMPLATES, isProducer, agentFolders, agentsDir, describeSteps, describeTrigger, describeTriggers, describeWorkflow, stepEnabled, stepId, visibleAgents, readAgentsConfig, writeAgentsConfig, DEFAULTS, type AgentsConfig, type Project, type Step, type StepId, type Trigger, type Workflow } from './config.ts';
 import { controlChecks, controlCommands, controlUsage } from './control.ts';
 import { keyStore, looksLikeLinearKey, readLinearKey, readSecret, storeLinearKey, storeSecret } from './secrets.ts';
 import { TRACKERS } from './tracker.ts';
@@ -13,7 +13,7 @@ import { parseCron } from './cron.ts';
 import { trackersInUse } from './control.ts';
 import { runnerService } from './service.ts';
 import { createLinear } from './linear.ts';
-import { TRIGGER_FORMS, duplicateTriggerWarnings, moveKey, parseTrigger, renameKey, sameTrigger, validateConfig, validateWorkflow, workflowsUsing, type Place } from './manage.ts';
+import { TRIGGER_FORMS, duplicateTriggerWarnings, moveKey, parseTrigger, renameKey, sameTrigger, validateAgentFolder, validateConfig, validateWorkflow, workflowsUsing, type Place } from './manage.ts';
 import { parseStep, resolveName, stepNames } from './names.ts';
 import { findRepos } from './repos.ts';
 import { defaultBranch, sh } from './git.ts';
@@ -338,7 +338,7 @@ async function promptWorkflow(
     } while (await ui.confirm('Add another way to start this workflow?', false));
   }
 
-  let steps = w.steps?.length && (await keep('steps', describeSteps(w.steps))) ? w.steps : undefined;
+  let steps: Step[] | undefined = w.steps?.length && (await keep('steps', describeSteps(w.steps))) ? w.steps : undefined;
   let template: string | undefined;
   if (!steps) {
     const usable = Object.entries(TEMPLATES).filter(([, t]) => t.steps.every((st) => stepEnabled(st, config.enabled)));
@@ -418,6 +418,7 @@ const USAGE: [string, string][] = [
   ['link DIR [--claude | --codex]', 'Link the agents into a config folder'],
   ['unlink DIR', 'Remove the agents from a config folder'],
   ['key [--voidtrack]', 'Store or replace the Linear or VoidTrack API key (reads stdin without a terminal)'],
+  ['validate [DIR]', `Check an agent folder (DIR/${AGENT_FILE} and its prompts), or the config and every folder under agents/defs`],
   ['help [COMMAND]', 'Show this list, or one command'],
 ];
 
@@ -559,6 +560,14 @@ function pickWorkflow(config: AgentsConfig, input: string, ctx: ToolContext): st
   return r.name;
 }
 
+// A workflow from an agent folder is changed by editing its file. True (and
+// says so) when `name` is one.
+function inFolder(config: AgentsConfig, name: string, ctx: ToolContext): boolean {
+  const dir = config.folders?.[name];
+  if (dir) ctx.log(`${name} is defined in ${tilde(join(dir, AGENT_FILE))}; edit that file.`);
+  return !!dir;
+}
+
 async function teamsOrNull(ctx: ToolContext): Promise<Team[] | null> {
   try {
     return await linear(ctx.configDir).teams();
@@ -673,6 +682,7 @@ const workflowSubs: Record<string, ToolCommand> = {
     const config = readAgentsConfig(ctx.configDir);
     const name = pickWorkflow(config, p.positionals[0]!, ctx);
     if (!name) return 1;
+    if (inFolder(config, name, ctx)) return 1;
     const flags = readWorkflowFlags(p.values, config);
     if ('error' in flags) {
       ctx.log(flags.error);
@@ -725,6 +735,7 @@ const workflowSubs: Record<string, ToolCommand> = {
     const config = readAgentsConfig(ctx.configDir);
     const old = pickWorkflow(config, p.positionals[0]!, ctx);
     if (!old) return 1;
+    if (inFolder(config, old, ctx)) return 1;
     const next = p.positionals[1]!.trim();
     if (!next) {
       ctx.log('The new name cannot be empty.');
@@ -747,6 +758,7 @@ const workflowSubs: Record<string, ToolCommand> = {
     const config = readAgentsConfig(ctx.configDir);
     const name = pickWorkflow(config, p.positionals[0]!, ctx);
     if (!name) return 1;
+    if (inFolder(config, name, ctx)) return 1;
     const ok = await confirmed(`Delete workflow ${name}?`, !!p.values.yes, ctx);
     if (ok === 'refused') return 2;
     if (!ok) {
@@ -772,6 +784,7 @@ const workflowSubs: Record<string, ToolCommand> = {
     const config = readAgentsConfig(ctx.configDir);
     const name = pickWorkflow(config, p.positionals[0]!, ctx);
     if (!name) return 1;
+    if (inFolder(config, name, ctx)) return 1;
     let place: Place;
     if (v.first) place = { first: true };
     else if (v.last) place = { last: true };
@@ -1146,6 +1159,15 @@ const agents: Tool = {
           ? { name: 'agent workflows', status: 'fail', detail: `${broken.join(', ')} point at a missing project`, fix: 'vsf agents project edit' }
           : { name: 'agent workflows', status: 'ok', detail: `${workflows.length} ready` },
     );
+    const folders = agentFolders(ctx.configDir);
+    if (folders.length) {
+      const bad = folders.filter((d) => validateAgentFolder(d, saved).length).map((d) => basename(d));
+      checks.push(
+        bad.length
+          ? { name: 'agent folders', status: 'fail', detail: `${bad.join(', ')} ${bad.length === 1 ? 'has' : 'have'} problems`, fix: 'vsf agents validate' }
+          : { name: 'agent folders', status: 'ok', detail: `${folders.length} valid` },
+      );
+    }
     return [...checks, ...(await controlChecks(ctx))];
   },
 
@@ -1156,7 +1178,7 @@ const agents: Tool = {
       const p = begin('workflows', args, { json: { type: 'boolean' } }, ctx);
       if (typeof p === 'number') return p;
       const config = readAgentsConfig(ctx.configDir);
-      if (p.values.json) out(ctx, Object.entries(config.workflows).map(([name, w]) => ({ name, ...w })));
+      if (p.values.json) out(ctx, Object.entries(config.workflows).map(([name, w]) => ({ name, ...w, steps: w.steps.map(stepId) })));
       else if (!Object.keys(config.workflows).length) ctx.log('No workflows yet. vsf agents workflow add creates one.');
       else listWorkflows(config, ctx);
       return 0;
@@ -1170,6 +1192,24 @@ const agents: Tool = {
     },
 
     workflow: (args, ctx) => group('workflow', workflowSubs, args, ctx),
+
+    async validate(args, ctx) {
+      const p = begin('validate', args, {}, ctx);
+      if (typeof p === 'number') return p;
+      if (p.positionals.length > 1) {
+        ctx.log('Give one folder at most.');
+        ctx.log(usageOf('validate'));
+        return 2;
+      }
+      const config = readAgentsConfig(ctx.configDir);
+      const problems: string[] = [];
+      const dirs = p.positionals.length ? [resolve(expandHome(p.positionals[0]!))] : agentFolders(ctx.configDir);
+      if (!p.positionals.length) problems.push(...validateConfig(config));
+      for (const dir of dirs) for (const line of validateAgentFolder(dir, config)) problems.push(`${basename(dir)}: ${line}`);
+      for (const line of problems) ctx.log(line);
+      if (!problems.length) ctx.log(p.positionals.length ? `${basename(dirs[0]!)} is valid.` : `Config and ${plural(dirs.length, 'agent folder')} are valid.`);
+      return problems.length ? 1 : 0;
+    },
 
     async projects(args, ctx) {
       const p = begin('projects', args, { json: { type: 'boolean' } }, ctx);

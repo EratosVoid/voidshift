@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { agentsDir, type StepId, type Trigger } from './config.ts';
+import { agentsDir, type Trigger } from './config.ts';
 
 // What the runner is doing right now, kept in runner.lock so status, cancel
 // and stop can see it. Older runners wrote only the pid.
@@ -114,7 +114,8 @@ export function writePending(configDir: string, pending: Pending[]): void {
 export type Outcome = 'running' | 'verified' | 'changes' | 'parked' | 'cancelled';
 
 export interface StepRecord {
-  step: StepId;
+  // A built-in step id, or a custom step's id.
+  step: string;
   label: string;
   startedAt: string;
   endedAt?: string;

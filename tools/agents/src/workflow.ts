@@ -120,7 +120,7 @@ export function buildPrompt(p: PromptInput): string {
 
 // Consecutive verdict steps run as one block so every finding comes back at
 // once. Returns [start, end) of the block that starts at `i`.
-export function verdictBlock<T extends string>(steps: T[], i: number, isVerdict: (s: T) => boolean): [number, number] {
+export function verdictBlock<T>(steps: T[], i: number, isVerdict: (s: T) => boolean): [number, number] {
   let end = i;
   while (end < steps.length && isVerdict(steps[end]!)) end++;
   return [i, end];
@@ -128,7 +128,7 @@ export function verdictBlock<T extends string>(steps: T[], i: number, isVerdict:
 
 // Where a failed check sends the work: the nearest earlier step that produces
 // something. -1 means nothing to send it back to.
-export function fixTarget<T extends string>(steps: T[], blockStart: number, isProducer: (s: T) => boolean): number {
+export function fixTarget<T>(steps: T[], blockStart: number, isProducer: (s: T) => boolean): number {
   for (let j = blockStart - 1; j >= 0; j--) if (isProducer(steps[j]!)) return j;
   return -1;
 }

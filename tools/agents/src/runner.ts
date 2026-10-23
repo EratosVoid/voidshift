@@ -1,6 +1,5 @@
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { basename, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import {
   LABELS,
   PLAN_HEADING,
@@ -17,7 +16,7 @@ import {
   verdictBlock,
   type StepResult,
 } from './workflow.ts';
-import { STEPS, agentsDir, hasWork, isCardTrigger, isProducer, type AgentsConfig, type Workflow, type Project, type StepId, type Trigger } from './config.ts';
+import { agentsDir, hasWork, isCardTrigger, resolveStep, stepId, stepIdLabel, type AgentsConfig, type ResolvedStep, type Workflow, type Project, type Trigger } from './config.ts';
 import { lastDue, parseCron } from './cron.ts';
 import { runAgent, stopAgents } from './engine.ts';
 import { commitsAhead, defaultBranch, ensureDraftPr, ensureWorktree, headSha, markReady, push, resetWorktree, waitForChecks, waitForPrHead } from './git.ts';
@@ -26,8 +25,6 @@ import { noTracker, type Tracker, type Trackers } from './tracker.ts';
 import { recall, vaultPath } from './memory.ts';
 import { bootTime, clearCurrent, isPaused, ours, readCurrent, readPending, writeCurrent, writePending, writeRun, readCronState, writeCronState, type Pending, type RunRecord, type StepRecord } from './state.ts';
 
-const packDir = fileURLToPath(new URL('../pack/', import.meta.url));
-const skill = (name: string) => readFileSync(join(packDir, name, 'SKILL.md'), 'utf8');
 const stamp = () => new Date().toISOString().replace(/[:.]/g, '-');
 
 class Park extends Error {}
@@ -70,13 +67,16 @@ export function summarize(output: string): string {
 // The run in progress, so a cancel signal can mark it.
 let active: { record: RunRecord; runDir: string } | null = null;
 
-const isVerdict = (s: StepId) => STEPS[s].output === 'verdict';
+const isVerdict = (d: ResolvedStep) => d.output === 'verdict';
+const isProducer = (d: ResolvedStep) => d.output === 'plan' || d.output === 'commits';
+// The card label for a step: its own for a built-in step, a generic one otherwise.
+const stageOf = (d: ResolvedStep) => LABELS.stage[d.builtin ?? ''] ?? LABELS.working;
 
 // One card through a trigger's workflow. Steps run in order. A failed check (or a
 // run of consecutive checks) sends its findings back to the nearest earlier
 // step that produces something, Plan or Dev, and the workflow continues from
 // there, until everything passes or the loop cap parks the card.
-export async function runCard(card: Card, trigger: Trigger, workflowName: string, workflow: Workflow, project: Project, rc: RunContext, opts: { from?: StepId } = {}): Promise<'verified' | 'changes' | 'parked'> {
+export async function runCard(card: Card, trigger: Trigger, workflowName: string, workflow: Workflow, project: Project, rc: RunContext, opts: { from?: string } = {}): Promise<'verified' | 'changes' | 'parked'> {
   const { config, log } = rc;
   // A scheduled run has no card, so it has nothing to write back to.
   const linear: Tracker = isCardTrigger(trigger) ? rc.trackers(trigger.source) : noTracker;
@@ -84,7 +84,9 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
   const runDir = join(agentsDir(rc.configDir), 'runs', card.identifier, stamp());
   mkdirSync(runDir, { recursive: true });
   const say = (line: string) => log(`${card.identifier} ${line}`);
-  const steps = workflow.steps;
+  // Write back settings apply to card runs; a scheduled run has nothing to write to.
+  const writeBack = isCardTrigger(trigger) ? (workflow.writeBack ?? {}) : {};
+  const labelsOn = writeBack.labels !== false;
   const startedAt = new Date().toISOString();
   const record: RunRecord = { card: card.identifier, title: card.title, url: card.url || undefined, workflow: workflowName, trigger: label || (trigger.source === 'cron' ? trigger.schedule : ''), source: trigger.source, steps: [], outcome: 'running', startedAt };
   active = { record, runDir };
@@ -95,8 +97,8 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
   const mark = (step: string) => writeCurrent(rc.configDir, { pid: process.pid, card: card.identifier, title: card.title, workflow: workflowName, step, round: loops, startedAt, runDir, source: trigger.source });
   // Written before the first tracker call, so a cancel always knows the card.
   mark('Starting');
-  const begin = (step: StepId): StepRecord => {
-    const rec: StepRecord = { step, label: STEPS[step].label, startedAt: new Date().toISOString() };
+  const begin = (def: ResolvedStep): StepRecord => {
+    const rec: StepRecord = { step: def.id, label: def.label, startedAt: new Date().toISOString() };
     record.steps.push(rec);
     mark(rec.label);
     save();
@@ -121,7 +123,13 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
   const setRound = (n: number) => {
     loops = n;
   };
-  const stage = (name: string, round?: number) => linear.setLabels(card, stageLabels(card.labels, label, name, round));
+  const stage = async (name: string, round?: number) => {
+    if (labelsOn) await linear.setLabels(card, stageLabels(card.labels, label, name, round));
+  };
+  // How a run ends on the card: a stage label, or with labels off only the
+  // trigger taken away so the card is not picked up again.
+  const endLabels = (name: string, round?: number) =>
+    linear.setLabels(card, labelsOn ? stageLabels(card.labels, label, name, round) : card.labels.filter((l) => l !== label));
   // The tracker hears from the runner twice: the plan once it has passed review,
   // and one final comment. Findings stay here until the final one.
   let lastFindings = '';
@@ -135,35 +143,37 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
   async function park(reason: string): Promise<'parked'> {
     say(`parked: ${reason}`);
     const comment = `**Parked:** ${reason}${lastFindings ? `\n\n${lastFindings}` : ''}\n\nFix the cause, then add \`${label}\` again to retry.`;
-    const add = [LABELS.parked, ...(loops ? [LABELS.version(loops)] : [])];
+    const add = labelsOn ? [LABELS.parked, ...(loops ? [LABELS.version(loops)] : [])] : [];
     let commented = false;
     try {
       await postPlan();
       await linear.comment(card, comment);
       commented = true;
-      await linear.setLabels(card, stageLabels(card.labels, label, LABELS.parked, loops || undefined));
+      await endLabels(LABELS.parked, loops || undefined);
     } catch (err) {
       if (!isCardTrigger(trigger)) return done('parked', reason);
       say(`could not reach ${trigger.source === 'voidtrack' ? 'VoidTrack' : 'Linear'} to park it (${(err as Error).message}). Will retry next minute.`);
       // An empty comment is skipped on retry, so it is not posted twice.
-      writePending(rc.configDir, [...readPending(rc.configDir), { card: card.identifier, comment: commented ? '' : comment, drop: [label], add, dropStatus: true, source: trigger.source }]);
+      writePending(rc.configDir, [...readPending(rc.configDir), { card: card.identifier, comment: commented ? '' : comment, drop: [label], add, dropStatus: labelsOn, source: trigger.source }]);
     }
     return done('parked', reason);
   }
 
   try {
     if (!existsSync(join(project.path, '.git'))) throw new Park(`The project folder ${project.path} is not a git repository on this Mac.`);
-    const from = opts.from ? steps.indexOf(opts.from) : 0;
-    if (from < 0) throw new Park(`Workflow ${workflowName} has no ${STEPS[opts.from!].label} step.`);
+    const steps = workflow.steps.map((s) => resolveStep(s, config, config.folders?.[workflowName]));
+    const from = opts.from ? steps.findIndex((d) => d.id === opts.from) : 0;
+    if (from < 0) throw new Park(`Workflow ${workflowName} has no ${stepIdLabel(opts.from!)} step.`);
     // A scheduled run has no card to plan on, so its task is the plan unless a Plan step writes one.
     let plan = isCardTrigger(trigger) ? latestPlan(await linear.comments(card.identifier)) : card.description ?? null;
-    const firstPlan = steps.indexOf('vs-plan', from);
-    const needsPlan = steps.findIndex((s, n) => n >= from && (s === 'vs-dev' || s === 'vs-plan-review'));
+    const firstPlan = steps.findIndex((d, n) => n >= from && d.output === 'plan');
+    // A check before any commits is a check on the plan, like Plan review.
+    const needsPlan = steps.findIndex((d, n) => n >= from && (d.output === 'commits' || (d.output === 'verdict' && d.builtin !== 'vs-qa')));
     if (!plan && needsPlan >= 0 && (firstPlan < 0 || firstPlan > needsPlan)) {
       throw new Park('No plan comment (starting with "## Plan") was found. Publish a plan first, or start the workflow with Plan.');
     }
 
-    await stage(LABELS.stage[steps[from]!]!);
+    await stage(stageOf(steps[from]!));
     const base = project.base || defaultBranch(project.path);
     const vault = vaultPath(rc.configDir);
     const known = [recall(rc.selfCommand, rc.configDir, `${workflow.project} ${card.title}\n${card.description ?? ''}`), vault ? memoryNote(vault) : ''].filter(Boolean).join('\n\n');
@@ -176,14 +186,13 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
     let prUrl = '';
     let logs = 0;
     const planText = () => plan ?? '(No plan was posted on this card. Check the work against the card itself.)';
-    const timeoutMs = config.timeoutMinutes * 60_000;
     const logFile = (name: string) => join(runDir, `${String(logs++).padStart(2, '0')}-${name}.log`);
 
-    async function check(step: StepId, round: number): Promise<StepResult> {
-      const label = STEPS[step].label;
-      const rec = begin(step);
+    async function check(def: ResolvedStep, round: number): Promise<StepResult> {
+      const label = def.label;
+      const rec = begin(def);
       let ciNote = '';
-      if (step === 'vs-qa') {
+      if (def.builtin === 'vs-qa') {
         if (commitsAhead(worktree, base) === 0) {
           end(rec, 'SKIP', 'No changes on the branch yet.');
           return { step: label, verdict: 'SKIP', report: 'No changes on the branch yet.' };
@@ -210,12 +219,12 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
           ciNote = ci.verdict === 'SHIP' ? '# CI\n\nCI passed on this branch.' : '# CI\n\nThis repo has no CI checks.';
         }
       }
-      const log = logFile(step);
+      const log = logFile(def.id);
       const r = await runAgent({
-        engine: config.engine, model: config.models.review, cwd: worktree, vault, write: step === 'vs-qa', logFile: log, timeoutMs,
-        prompt: buildPrompt({ skill: skill(step), card, plan: planText(), base, round, extra: [known, ciNote, UNATTENDED].filter(Boolean).join('\n\n') }),
+        engine: def.engine, model: def.model, cwd: worktree, vault, write: def.write, logFile: log, timeoutMs: def.timeoutMs,
+        prompt: buildPrompt({ skill: def.prompt(), card, plan: planText(), base, round, extra: [known, ciNote, UNATTENDED].filter(Boolean).join('\n\n') }),
       });
-      if (step === 'vs-qa') resetWorktree(worktree);
+      if (def.builtin === 'vs-qa') resetWorktree(worktree);
       const verdict = parseVerdict(r.output);
       end(rec, verdict, r.output, log);
       return { step: label, verdict, report: r.output };
@@ -223,19 +232,19 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
 
     let i = from;
     while (i < steps.length) {
-      const step = steps[i]!;
-      say(`${STEPS[step].label}`);
+      const def = steps[i]!;
+      say(def.label);
 
-      if (isVerdict(step)) {
+      if (isVerdict(def)) {
         const [start, end] = verdictBlock(steps, i, isVerdict);
         const target = fixTarget(steps, start, isProducer);
         const producer = target >= 0 ? steps[target] : undefined;
         // The round being checked: how many times its producer has run.
-        const round = Math.max(producer === 'vs-plan' ? runs.plan : runs.dev, 1);
+        const round = Math.max(producer?.output === 'plan' ? runs.plan : runs.dev, 1);
         setRound(round);
         const results: StepResult[] = [];
         for (const s of steps.slice(start, end)) {
-          await stage(LABELS.stage[s]!, round);
+          await stage(stageOf(s), round);
           results.push(await check(s, round));
         }
         if (qaPassed(results)) {
@@ -247,27 +256,27 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
         if (target < 0) {
           await postPlan();
           await linear.comment(card, `**Changes needed.**\n\n${notes}`);
-          await linear.setLabels(card, stageLabels(card.labels, label, LABELS.changes, round));
+          await endLabels(LABELS.changes, round);
           say('changes requested');
           return done('changes');
         }
         // Rounds caps how many times Plan or Dev runs, counting the first.
         if (round >= workflow.maxRounds) {
-          throw new Park(`Checks still failed after ${round} ${producer === 'vs-plan' ? 'plan' : 'dev'} rounds.${prUrl ? ` PR: ${prUrl}` : ''}`);
+          throw new Park(`Checks still failed after ${round} ${producer?.output === 'plan' ? 'plan' : 'dev'} rounds.${prUrl ? ` PR: ${prUrl}` : ''}`);
         }
         findings.set(target, notes);
         i = target;
         continue;
       }
 
-      if (step === 'vs-plan') {
+      if (def.output === 'plan') {
         setRound(runs.plan + 1);
-        await stage(LABELS.stage[step]!, runs.plan + 1);
-        const rec = begin(step);
-        const log = logFile('plan');
+        await stage(stageOf(def), runs.plan + 1);
+        const rec = begin(def);
+        const log = logFile(def.builtin ? 'plan' : def.id);
         const r = await runAgent({
-          engine: config.engine, model: config.models.dev, cwd: worktree, vault, write: false, logFile: log, timeoutMs,
-          prompt: buildPrompt({ skill: skill('vs-plan'), card, plan: plan ?? '(none yet, you are writing it)', base, round: runs.plan + 1, findings: findings.get(i), extra: [known, UNATTENDED].filter(Boolean).join('\n\n') }),
+          engine: def.engine, model: def.model, cwd: worktree, vault, write: def.write, logFile: log, timeoutMs: def.timeoutMs,
+          prompt: buildPrompt({ skill: def.prompt(), card, plan: plan ?? '(none yet, you are writing it)', base, round: runs.plan + 1, findings: findings.get(i), extra: [known, UNATTENDED].filter(Boolean).join('\n\n') }),
         });
         const result = parseDevResult(r.output);
         end(rec, result.status === 'blocked' ? 'blocked' : 'done', r.output, log);
@@ -275,21 +284,21 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
         plan = planBody(r.output);
         planToPost = plan;
         runs.plan++;
-      } else if (step === 'vs-publish') {
+      } else if (def.output === 'publish') {
         await postPlan();
-        const rec = begin(step);
+        const rec = begin(def);
         push(worktree, card.branchName);
         end(rec, 'pushed');
-      } else if (step === 'vs-dev') {
+      } else if (def.output === 'commits') {
         await postPlan();
         setRound(runs.dev + 1);
-        await stage(LABELS.stage[step]!, runs.dev + 1);
-        const rec = begin(step);
-        const log = logFile('dev');
+        await stage(stageOf(def), runs.dev + 1);
+        const rec = begin(def);
+        const log = logFile(def.builtin ? 'dev' : def.id);
         const before = headSha(worktree);
         const dev = await runAgent({
-          engine: config.engine, model: config.models.dev, cwd: worktree, vault, write: true, logFile: log, timeoutMs,
-          prompt: buildPrompt({ skill: skill('vs-dev'), card, plan: planText(), base, round: runs.dev + 1, findings: findings.get(i), extra: [known, UNATTENDED].filter(Boolean).join('\n\n') }),
+          engine: def.engine, model: def.model, cwd: worktree, vault, write: def.write, logFile: log, timeoutMs: def.timeoutMs,
+          prompt: buildPrompt({ skill: def.prompt(), card, plan: planText(), base, round: runs.dev + 1, findings: findings.get(i), extra: [known, UNATTENDED].filter(Boolean).join('\n\n') }),
         });
         const result = parseDevResult(dev.output);
         end(rec, result.status === 'blocked' ? 'blocked' : 'done', dev.output, log);
@@ -303,19 +312,31 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
         record.prUrl = prUrl;
         save();
         runs.dev++;
+      } else {
+        // A step with no output the workflow reads: it runs once and must finish.
+        await stage(stageOf(def), loops || undefined);
+        const rec = begin(def);
+        const log = logFile(def.id);
+        const r = await runAgent({
+          engine: def.engine, model: def.model, cwd: worktree, vault, write: def.write, logFile: log, timeoutMs: def.timeoutMs,
+          prompt: buildPrompt({ skill: def.prompt(), card, plan: plan ?? '(none)', base, round: loops || 1, extra: [known, UNATTENDED].filter(Boolean).join('\n\n') }),
+        });
+        end(rec, r.ok ? 'done' : 'failed', r.output, log);
+        if (!r.ok) throw new Park(`The ${def.label} step failed or timed out.`);
       }
       findings.delete(i);
       i++;
     }
 
     await postPlan();
-    let moved = false;
-    if (hasWork(workflow)) {
-      markReady(worktree, card.branchName);
-      moved = await linear.moveTo(card, config.reviewState);
+    // Unset moves a card with commits to reviewState; a state always moves it; null never does.
+    const state = writeBack.state === undefined ? (hasWork(workflow) ? config.reviewState : null) : writeBack.state;
+    if (hasWork(workflow)) markReady(worktree, card.branchName);
+    const moved = state ? await linear.moveTo(card, state) : true;
+    await endLabels(LABELS.verified, loops || undefined);
+    if (writeBack.comment !== false) {
+      await linear.comment(card, `**All checks passed.**${prUrl ? ` PR ready: ${prUrl}` : ''}${!moved ? `\n\n(No "${state}" state on this team, so the card was not moved.)` : ''}`);
     }
-    await linear.setLabels(card, stageLabels(card.labels, label, LABELS.verified, loops || undefined));
-    await linear.comment(card, `**All checks passed.**${prUrl ? ` PR ready: ${prUrl}` : ''}${hasWork(workflow) && !moved ? `\n\n(No "${config.reviewState}" state on this team, so the card was not moved.)` : ''}`);
     say('verified');
     return done('verified');
   } catch (err) {
@@ -459,7 +480,7 @@ function queueCancel(configDir: string, cardId: string, comment: string, source:
 }
 
 // One pass for the background runner. A lock keeps two passes from working at once.
-export async function tick(rc: RunContext, only?: string, opts: { workflow?: string; from?: StepId } = {}): Promise<number> {
+export async function tick(rc: RunContext, only?: string, opts: { workflow?: string; from?: string } = {}): Promise<number> {
   const held = readCurrent(rc.configDir);
   const booted = bootTime();
   // A lock from before the last boot cannot be a live run, whatever its pid is now.
@@ -517,8 +538,8 @@ export async function tick(rc: RunContext, only?: string, opts: { workflow?: str
       rc.log(`Workflow ${job.workflow} points at a missing project ${workflow.project}. Run vsf agents workflow edit to fix it.`);
       return 1;
     }
-    if (opts.from && !workflow.steps.includes(opts.from)) {
-      rc.log(`Workflow ${job.workflow} has no ${STEPS[opts.from].label} step.`);
+    if (opts.from && !workflow.steps.some((s) => stepId(s) === opts.from)) {
+      rc.log(`Workflow ${job.workflow} has no ${stepIdLabel(opts.from)} step.`);
       return 2;
     }
     const outcome = await runCard(job.card, job.trigger, job.workflow, workflow, project, rc, { from: opts.from });
