@@ -22,7 +22,7 @@ import { runAgent, stopAgents } from './engine.ts';
 import { commitsAhead, enforceCommitPolicy, defaultBranch, ensureDraftPr, ensureWorktree, headSha, markReady, push, resetWorktree, waitForChecks, waitForPrHead } from './git.ts';
 import type { Card } from './linear.ts';
 import { noTracker, type Tracker, type Trackers } from './tracker.ts';
-import { recall, vaultPath } from './memory.ts';
+import { recall, syncMemory, vaultPath } from './memory.ts';
 import { claudeSettingsFile, readRules, rulesSection } from './profile.ts';
 import { bootTime, clearCurrent, isPaused, ours, readCurrent, readPending, writeCurrent, writePending, writeRun, readCronState, writeCronState, type Pending, type RunRecord, type StepRecord } from './state.ts';
 
@@ -185,6 +185,9 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
       throw new Park(`Your agent profile's Claude settings are broken: ${(err as Error).message}`);
     }
     const rules = rulesSection(readRules(rc.configDir));
+    // Latest notes from every machine before recall reads them.
+    const pulled = syncMemory(rc.selfCommand, rc.configDir);
+    if (pulled) say(pulled);
     const known = [recall(rc.selfCommand, rc.configDir, `${workflow.project} ${card.title}\n${card.description ?? ''}`), vault ? memoryNote(vault) : '', rules].filter(Boolean).join('\n\n');
     const worktree = join(agentsDir(rc.configDir), 'worktrees', card.identifier);
     ensureWorktree(project.path, worktree, card.branchName, base);
@@ -356,6 +359,9 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
     return park(`Something went wrong: ${(err as Error).message}`);
   } finally {
     active = null;
+    // Share whatever notes the agents wrote, whatever the outcome.
+    const shared = syncMemory(rc.selfCommand, rc.configDir);
+    if (shared) say(shared);
   }
 }
 

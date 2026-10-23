@@ -32,3 +32,14 @@ export function recall(selfCommand: string[], configDir: string, text: string): 
     return '';
   }
 }
+
+// Brings the vault up to date through its git remote, or shares the notes
+// agents wrote. Never fails a run: returns a line worth logging, or ''.
+export function syncMemory(selfCommand: string[], configDir: string): string {
+  if (!vaultPath(configDir) || !selfCommand.length) return '';
+  const [cmd, ...args] = selfCommand;
+  const r = spawnSync(cmd!, [...args, 'memory', 'sync', '--quiet'], { encoding: 'utf8', timeout: 90_000 });
+  const out = `${r.stdout ?? ''}${r.stderr ?? ''}`.trim();
+  if (r.error) return `memory sync did not run (${r.error.message})`;
+  return r.status === 0 ? out : out || 'memory sync failed';
+}
