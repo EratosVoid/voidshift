@@ -270,11 +270,13 @@ export function ProgressSteps(props: { steps: StepProgress[]; barWidth?: number 
 export function outcomeColour(outcome: string): string {
   switch (outcome) {
     case 'verified':
+    case 'done':
       return theme.green;
     case 'parked':
     case 'changes':
       return theme.yellow;
     case 'cancelled':
+    case 'failed':
       return theme.red;
     case 'running':
       return theme.accent;

@@ -30,3 +30,13 @@ test('Linux is supported, Windows is not', () => {
   const windows = baseChecks('win32', 'v24.0.0', fake({ git: 'git 2', gh: '', claude: '2.1' }));
   assert.equal(windows.find((c) => c.name === 'platform')?.status, 'fail');
 });
+
+test('one agent CLI installed means the other is not checked at all', () => {
+  const claude = baseChecks('darwin', 'v24.0.0', fake({ git: 'git 2', gh: '', claude: '2.1' }));
+  assert.ok(!claude.some((c) => c.name === 'Codex CLI'));
+  assert.ok(claude.some((c) => c.name === 'Claude Code' && c.status === 'ok'));
+  const codex = baseChecks('darwin', 'v24.0.0', fake({ git: 'git 2', gh: '', codex: '0.1' }));
+  assert.ok(!codex.some((c) => c.name === 'Claude Code'));
+  const none = baseChecks('darwin', 'v24.0.0', fake({ git: 'git 2', gh: '' }));
+  assert.ok(none.some((c) => c.name === 'Codex CLI') && none.some((c) => c.name === 'Claude Code'));
+});

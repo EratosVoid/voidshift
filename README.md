@@ -136,6 +136,20 @@ verified card there (`null` never moves it), `labels: false` only takes the
 trigger label off, and `comment: false` skips the closing comment. Edit the file,
 then `vsf agents validate`.
 
+A step can run a shell command instead of an agent: `"run": "node sweep.mjs"`
+with `output: "none"`. Exit 0 is done, anything else fails the run, and the last
+line it prints is the step's summary. A run made only of command steps works in
+the project folder, with no worktree or branch. A step with `"handoff": "WORKFLOW"`
+hands cards on: every `HANDOFF: ENG-12` line in its output queues that card for
+the named workflow, which runs it as a run of its own, label or not. The card
+leaves the queue once its run has started.
+
+Scheduled runs are jobs: `vsf agents status` shows one line per job, the Runs
+list keeps to card runs (`vsf agents runs --jobs` lists the scheduled ones), and
+a scheduled run that opened no pull request removes its worktree and branch. A
+run whose process ends without an outcome is closed as failed on the runner's
+next pass.
+
 ### memory
 
 A folder of markdown notes, one topic per note, with an `INDEX.md` holding one

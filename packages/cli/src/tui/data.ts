@@ -43,13 +43,26 @@ export interface AgentsStatus {
   // Every live run, one per busy workspace. Older agents print only current.
   running?: AgentsCurrent[];
   parked: { card: string; reason?: string }[];
+  // Latest run per card that failed, process deaths included; older agents print none.
+  failed?: { card: string; reason?: string }[];
   interrupted: string[];
+  // Scheduled jobs and how they last did; older agents print none.
+  jobs?: JobStatus[];
   workflows: number;
   projects: number;
   // The Claude 5 hour window as last read; older agents print none.
   window?: AgentsWindow | null;
   // Most runs at once; 0 or unset means no cap.
   maxRuns?: number;
+}
+
+export interface JobStatus {
+  workflow: string;
+  schedule: string;
+  task: string;
+  last: { at: string; outcome: string; reason?: string; summary?: string } | null;
+  lastOkAt: string | null;
+  today: { runs: number; failed: number; handed: number };
 }
 
 export interface AgentsWindow {
@@ -85,6 +98,7 @@ export interface StepRecord {
   summary?: string;
   log?: string;
   usage?: Usage;
+  handoffs?: string[];
 }
 
 export interface RunRecord {
@@ -94,7 +108,8 @@ export interface RunRecord {
   workflow: string;
   trigger?: string;
   steps: StepRecord[];
-  outcome: 'running' | 'verified' | 'changes' | 'parked' | 'cancelled';
+  source?: 'linear' | 'voidtrack' | 'cron';
+  outcome: 'running' | 'verified' | 'done' | 'changes' | 'parked' | 'failed' | 'cancelled';
   reason?: string;
   prUrl?: string;
   startedAt: string;
@@ -415,14 +430,23 @@ export class Poller {
         errors[`agents.${key}`] = messageOf(err);
       }
     };
+    // Card runs and scheduled runs come as two lists, so a busy schedule never
+    // pushes card runs out of the limit. Older agents know no --jobs and
+    // already list every run, so that read may fail quietly.
+    let jobRuns: RunItem[] = [];
     await Promise.all([
       get<RunItem[]>('runs', 'runs', ['--json', '--limit', '60'], (v) => (patch.runs = v)),
+      captureJson(tool, 'runs', ['--json', '--jobs', '--limit', '60'], this.base).then(
+        (v) => (jobRuns = v as RunItem[]),
+        () => {},
+      ),
       get<WorkflowItem[]>('workflows', 'workflows', ['--json'], (v) => (patch.workflows = v)),
       get<ProjectItem[]>('projects', 'projects', ['--json'], (v) => (patch.projects = v)),
       get<HomeItem[]>('homes', 'homes', ['--json'], (v) => (patch.homes = v)),
       // The step catalog never changes while the dashboard is open.
       this.state.steps ? Promise.resolve() : get<StepsCatalog>('steps', 'steps', [], (v) => (patch.steps = v)),
     ]);
+    if (patch.runs && jobRuns.length) patch.runs = [...patch.runs, ...jobRuns].sort((a, b) => (a.stamp < b.stamp ? 1 : -1));
     patch.agentsConfig = this.readToolConfig('agents');
   }
 

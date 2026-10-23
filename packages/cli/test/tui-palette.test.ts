@@ -69,13 +69,14 @@ test('enter runs a pick, completes a template, or runs what was typed', () => {
 test('dynamic picks name parked, live and recent cards', () => {
   const state = {
     ...emptyState(['agents']),
-    agents: { runner: 'running' as const, lastTick: null, current: { pid: 1, card: 'ENG-5' }, parked: [{ card: 'ENG-7' }], interrupted: [], workflows: 1, projects: 1 },
+    agents: { runner: 'running' as const, lastTick: null, current: { pid: 1, card: 'ENG-5' }, parked: [{ card: 'ENG-7' }], failed: [{ card: 'ENG-8' }], interrupted: [], workflows: 1, projects: 1 },
     runs: [
       { card: 'ENG-7', stamp: 'a', dir: 'd', logs: [], record: { card: 'ENG-7', title: 't', workflow: 'w', outcome: 'parked' as const, startedAt: 'x', steps: [{ step: 'vs-qa', label: 'QA', startedAt: 'x' }] } },
     ],
   };
   const texts = dynamicEntries(state).map((e) => e.text);
   assert.ok(texts.includes('agents retry ENG-7'));
+  assert.ok(texts.includes('agents retry ENG-8'));
   assert.ok(texts.includes('agents cancel ENG-5'));
   assert.ok(texts.includes('agents show ENG-7'));
   assert.ok(texts.includes('agents run ENG-7 --from qa'));

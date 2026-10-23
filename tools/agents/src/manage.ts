@@ -9,7 +9,7 @@ const isInt = (v: unknown, min: number, max: number) => typeof v === 'number' &&
 const RESULT_LINE: Partial<Record<StepDef['output'], string>> = { plan: 'RESULT:', commits: 'RESULT:', verdict: 'VERDICT:' };
 
 // Everything wrong with one step. `dir` is the agent folder its files are in.
-export function validateStep(step: Step, config: Pick<AgentsConfig, 'enabled'>, dir?: string): string[] {
+export function validateStep(step: Step, config: Pick<AgentsConfig, 'enabled'> & Partial<Pick<AgentsConfig, 'workflows'>>, dir?: string): string[] {
   if (typeof step === 'string') {
     if (!isBuiltin(step)) return [`Unknown step ${step}.`];
     return config.enabled.length && !config.enabled.includes(step) ? [`Step ${step} is not enabled.`] : [];
@@ -24,11 +24,18 @@ export function validateStep(step: Step, config: Pick<AgentsConfig, 'enabled'>, 
   if (step.label !== undefined && typeof step.label !== 'string') problems.push(`${name} label must be text.`);
   if (step.prompt !== undefined && typeof step.prompt !== 'string') problems.push(`${name} prompt must be a file name.`);
   if (step.skill !== undefined && typeof step.skill !== 'string') problems.push(`${name} skill must be a name or a folder.`);
-  const sources = [step.skill, step.prompt].filter((v) => v !== undefined).length;
+  if (step.run !== undefined && (typeof step.run !== 'string' || !step.run.trim())) problems.push(`${name} run must be a command.`);
+  if (step.handoff !== undefined) {
+    if (typeof step.handoff !== 'string' || !step.handoff.trim()) problems.push(`${name} handoff must be a workflow name.`);
+    else if (config.workflows && !Object.hasOwn(config.workflows, step.handoff)) problems.push(`${name} hands cards to ${step.handoff}, which is not a workflow.`);
+  }
+  const sources = [step.skill, step.prompt, step.run].filter((v) => v !== undefined).length;
   if (step.output === 'publish') {
-    if (sources) problems.push(`${name} only pushes the branch, so it takes no skill or prompt.`);
-  } else if (sources !== 1) problems.push(`${name} needs exactly one of skill or prompt.`);
-  else if (typeof (step.prompt ?? step.skill) === 'string') {
+    if (sources) problems.push(`${name} only pushes the branch, so it takes no skill, prompt or run.`);
+  } else if (sources !== 1) problems.push(`${name} needs exactly one of skill, prompt or run.`);
+  else if (step.run !== undefined) {
+    if (step.output !== 'none') problems.push(`${name} runs a command, so its output must be none.`);
+  } else if (typeof (step.prompt ?? step.skill) === 'string') {
     const file = stepFile(step, dir);
     if (!file || !existsSync(file)) problems.push(`${name} ${step.prompt ? 'prompt' : 'skill'} ${file ?? ''} does not exist.`);
     else {
@@ -46,7 +53,7 @@ export function validateStep(step: Step, config: Pick<AgentsConfig, 'enabled'>, 
 
 // Everything wrong with one workflow, in plain words. Empty means it is fine.
 // `dir` is the agent folder a folder workflow comes from.
-export function validateWorkflow(config: Pick<AgentsConfig, 'enabled' | 'projects'>, workflow: Workflow, dir?: string): string[] {
+export function validateWorkflow(config: Pick<AgentsConfig, 'enabled' | 'projects'> & Partial<Pick<AgentsConfig, 'workflows'>>, workflow: Workflow, dir?: string): string[] {
   const problems: string[] = [];
   if (!workflow.triggers?.length) problems.push('Needs at least one trigger.');
   for (const t of workflow.triggers ?? []) {
@@ -92,8 +99,8 @@ export function validateAgentFolder(dir: string, config: Pick<AgentsConfig, 'ena
   } catch (err) {
     return [`${AGENT_FILE}: ${(err as Error).message}`];
   }
-  const problems = validateWorkflow(config, workflow, dir);
   const name = basename(dir);
+  const problems = validateWorkflow({ ...config, workflows: { ...config.workflows, [name]: workflow } }, workflow, dir);
   const from = config.folders?.[name];
   if (config.workflows[name] && (!from || resolve(from) !== resolve(dir))) problems.push(`config.json already has a workflow named ${name}, and it wins. Rename the folder.`);
   return problems;
@@ -221,7 +228,7 @@ export function validateConfig(value: unknown, saved?: Pick<AgentsConfig, 'proje
   if (!Array.isArray(value.homes) || value.homes.some((h) => !isObj(h) || (h.kind !== 'claude' && h.kind !== 'codex') || typeof h.dir !== 'string')) problems.push('homes must be a list of { kind: claude or codex, dir }.');
   if (!isObj(value.workflows)) problems.push('workflows must be an object.');
   else {
-    const ctx = { enabled: Array.isArray(value.enabled) ? (value.enabled as StepId[]) : [], projects: (projects ?? {}) as AgentsConfig['projects'] };
+    const ctx = { enabled: Array.isArray(value.enabled) ? (value.enabled as StepId[]) : [], projects: (projects ?? {}) as AgentsConfig['projects'], workflows: value.workflows as AgentsConfig['workflows'] };
     for (const [name, w] of Object.entries(value.workflows)) {
       // Folder workflows are checked with their folder, by vsf agents validate.
       if (isObj(value.folders) && value.folders[name]) continue;

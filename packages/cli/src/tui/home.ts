@@ -3,7 +3,7 @@
 // shaping of the store's data into lines (tested); the component below draws them.
 import React, { useEffect, useState } from 'react';
 import { Box, Text } from 'ink';
-import { liveRunsOf, useData, runsThisWeek, updateNotice, type AgentsCurrent, type AgentsStatus, type AwakeStatus, type DataState, type MemoryStatus, type RunItem } from './data.ts';
+import { liveRunsOf, useData, runsThisWeek, updateNotice, type AgentsCurrent, type AgentsStatus, type AwakeStatus, type DataState, type JobStatus, type MemoryStatus, type RunItem } from './data.ts';
 import { useHints, useKeys, useScreen, type Hint } from './context.ts';
 import { clock, clockOrStamp, duration, minutesText, plural, secondsToNextCheck, tilde, truncate } from './format.ts';
 import { theme } from './theme.ts';
@@ -143,20 +143,42 @@ export function runnerLines(agents: AgentsStatus, nowMs: number): { left: Line; 
 
 export interface ParkedRow {
   card: string;
-  kind: 'parked' | 'interrupted';
+  kind: 'parked' | 'failed' | 'interrupted';
   text: string;
 }
 
-// Parked and interrupted cards, the ones `r` can retry.
+// Parked, failed and interrupted cards, the ones `r` can retry. One row per card.
 export function parkedRows(agents: AgentsStatus): ParkedRow[] {
-  return [
+  const rows: ParkedRow[] = [
     ...agents.parked.map((p) => ({ card: p.card, kind: 'parked' as const, text: p.reason ? `parked: ${truncate(p.reason, 70)}` : 'parked' })),
+    ...(agents.failed ?? []).map((p) => ({ card: p.card, kind: 'failed' as const, text: p.reason ? `failed: ${truncate(p.reason, 70)}` : 'failed' })),
     ...agents.interrupted.map((c) => ({ card: c, kind: 'interrupted' as const, text: 'interrupted' })),
   ];
+  return rows.filter((r, i) => rows.findIndex((o) => o.card === r.card) === i);
+}
+
+export interface JobRow {
+  workflow: string;
+  // True when the last run failed or parked.
+  bad: boolean;
+  text: string;
+}
+
+// One line per scheduled job: when it last worked, or why it last did not.
+export function jobRows(agents: AgentsStatus): JobRow[] {
+  return (agents.jobs ?? []).map((j: JobStatus) => {
+    const last = j.last;
+    if (last && (last.outcome === 'failed' || last.outcome === 'parked')) {
+      const why = last.reason ?? last.summary ?? last.outcome;
+      return { workflow: j.workflow, bad: true, text: `! ${j.workflow} last failed ${clock(new Date(last.at))}: ${truncate(why, 70)}` };
+    }
+    const ok = j.lastOkAt ? clock(new Date(j.lastOkAt)) : 'never';
+    return { workflow: j.workflow, bad: false, text: `${j.workflow}  cron ${j.schedule}  last ok ${ok} · ${j.today.runs} today · ${j.today.handed} handed` };
+  });
 }
 
 export function countsLine(agents: AgentsStatus, runs: RunItem[], nowMs: number): string {
-  return [plural(agents.workflows, 'workflow'), plural(agents.projects, 'project'), plural(runsThisWeek(runs, nowMs), 'run') + ' this week'].join(' · ');
+  return [plural(agents.workflows, 'workflow'), plural(agents.projects, 'project'), plural(runsThisWeek(runs.filter((r) => r.record?.source !== 'cron'), nowMs), 'run') + ' this week'].join(' · ');
 }
 
 // ---- Awake ----------------------------------------------------------------
@@ -271,7 +293,11 @@ export function Home(): React.ReactElement {
   const at = clampFocus(sections, focus);
   const agents = state.agents;
   const parked = agents ? parkedRows(agents) : [];
-  const sel = Math.min(parkedIdx, Math.max(0, parked.length - 1));
+  const jobs = agents ? jobRows(agents) : [];
+  // Parked rows first, then job lines, in one selectable list.
+  const total = parked.length + jobs.length;
+  const sel = Math.min(parkedIdx, Math.max(0, total - 1));
+  const selJob = sel >= parked.length ? jobs[sel - parked.length] : undefined;
   const update = updateNotice(state.update);
 
   useHints(homeHints({ runner: agents?.runner, hasAwake: !!state.awake }));
@@ -279,10 +305,10 @@ export function Home(): React.ReactElement {
   useKeys((input, key) => {
     if (key.tab) setFocus(nextSection(sections, at, key.shift ? -1 : 1));
     else if (key.return) {
-      const card = at === 'agents' ? parked[sel]?.card : undefined;
-      ctx.nav.push(SCREEN_OF[at], at === 'agents' ? { tab: 'agents.runs', ...(card ? { card } : {}) } : {});
+      const card = at === 'agents' && !selJob ? parked[sel]?.card : undefined;
+      ctx.nav.push(SCREEN_OF[at], at === 'agents' ? { tab: 'agents.runs', ...(card ? { card } : {}), ...(selJob ? { job: selJob.workflow } : {}) } : {});
     } else if (at === 'agents' && key.upArrow) setParkedIdx(Math.max(0, sel - 1));
-    else if (at === 'agents' && key.downArrow) setParkedIdx(Math.min(parked.length - 1, sel + 1));
+    else if (at === 'agents' && key.downArrow) setParkedIdx(Math.min(total - 1, sel + 1));
     else if (input === 'p' && agents) {
       if (agents.runner === 'stopped') ctx.toast('The runner is stopped. Start it with: vsf agents start', 'info');
       else
@@ -303,7 +329,7 @@ export function Home(): React.ReactElement {
           cancelLabel: 'Cancel',
           done: 'Awake is on',
         });
-    } else if (input === 'r' && parked[sel]) {
+    } else if (input === 'r' && !selJob && parked[sel]) {
       const card = parked[sel]!.card;
       void ctx.actions.run({
         args: ['agents', 'retry', card],
@@ -369,6 +395,7 @@ function AgentsPanel(props: { focused: boolean; selected: number; now: number })
   const run = runnerLines(agents, props.now);
   const lives = liveCards(state, props.now);
   const parked = parkedRows(agents);
+  const jobs = jobRows(agents);
   const rows: React.ReactNode[] = [h(SplitRow, { key: 'runner', left: run.left, right: run.right })];
 
   for (const live of lives) {
@@ -406,8 +433,21 @@ function AgentsPanel(props: { focused: boolean; selected: number; now: number })
       rows.push(
         h(SplitRow, {
           key: `p${p.card}`,
-          left: [seg(p.kind === 'parked' ? '! ' : '○ ', p.kind === 'parked' ? theme.yellow : theme.dim), seg(p.card, p.kind === 'parked' ? theme.yellow : theme.dim, { bold: on }), seg(`  ${p.text}`)],
-          right: on || parked.length === 1 ? [seg('r retry · enter details', theme.dim)] : [],
+          left: [seg(p.kind === 'interrupted' ? '○ ' : '! ', p.kind === 'parked' ? theme.yellow : p.kind === 'failed' ? theme.red : theme.dim), seg(p.card, p.kind === 'parked' ? theme.yellow : p.kind === 'failed' ? theme.red : theme.dim, { bold: on }), seg(`  ${p.text}`)],
+          right: on || (parked.length === 1 && !jobs.length) ? [seg('r retry · enter details', theme.dim)] : [],
+        }),
+      );
+    });
+  }
+  if (jobs.length) {
+    rows.push(h(Text, { key: 'g2j' }, ' '));
+    jobs.forEach((j, i) => {
+      const on = props.focused && parked.length + i === props.selected;
+      rows.push(
+        h(SplitRow, {
+          key: `j${j.workflow}`,
+          left: [seg(j.text, j.bad ? theme.yellow : theme.dim, { bold: on })],
+          right: on ? [seg('enter shows its runs', theme.dim)] : [],
         }),
       );
     });

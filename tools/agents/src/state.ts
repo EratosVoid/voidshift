@@ -198,7 +198,10 @@ export function writePending(configDir: string, pending: Pending[]): void {
 }
 
 // One card's pass through a workflow, saved as run.json in its run folder.
-export type Outcome = 'running' | 'verified' | 'changes' | 'parked' | 'cancelled';
+// The runner alone writes it. verified: a card run whose checks all passed.
+// done: a scheduled run that finished. failed: a step's process failed, or the
+// run ended without finishing.
+export type Outcome = 'running' | 'verified' | 'done' | 'changes' | 'parked' | 'failed' | 'cancelled';
 
 // Tokens and cost of one step, or added up over a run. Codex steps carry only
 // the model. Cost is what Claude reports, an estimate.
@@ -256,6 +259,8 @@ export interface StepRecord {
   // File name of the step's log inside the run folder.
   log?: string;
   usage?: Usage;
+  // Cards this step handed to another workflow.
+  handoffs?: string[];
 }
 
 export interface RunRecord {
@@ -333,4 +338,80 @@ export function readCronState(configDir: string): Record<string, string> {
 export function writeCronState(configDir: string, state: Record<string, string>): void {
   mkdirSync(agentsDir(configDir), { recursive: true });
   writeFileSync(cronPath(configDir), JSON.stringify(state, null, 2) + '\n');
+}
+
+// Cards a step handed to another workflow, waiting for the runner to start
+// them. An entry leaves the queue once its run has started.
+export interface Handoff {
+  card: string;
+  workflow: string;
+  // The run that handed it over.
+  from: string;
+  at: string;
+}
+
+const handoffsPath = (configDir: string) => join(agentsDir(configDir), 'handoffs.json');
+
+export function readHandoffs(configDir: string): Handoff[] {
+  try {
+    return JSON.parse(readFileSync(handoffsPath(configDir), 'utf8')) as Handoff[];
+  } catch {
+    return [];
+  }
+}
+
+export function writeHandoffs(configDir: string, handoffs: Handoff[]): void {
+  mkdirSync(agentsDir(configDir), { recursive: true });
+  if (handoffs.length) writeFileSync(handoffsPath(configDir), JSON.stringify(handoffs, null, 2) + '\n');
+  else rmSync(handoffsPath(configDir), { force: true });
+}
+
+// Queues cards for a workflow, once each: a card already waiting for it is skipped.
+export function queueHandoffs(configDir: string, workflow: string, cards: string[], from: string, now = new Date()): Handoff[] {
+  const queue = readHandoffs(configDir);
+  const added: Handoff[] = [];
+  for (const card of cards) {
+    if (queue.some((h) => h.card === card && h.workflow === workflow)) continue;
+    const h = { card, workflow, from, at: now.toISOString() };
+    queue.push(h);
+    added.push(h);
+  }
+  if (added.length) writeHandoffs(configDir, queue);
+  return added;
+}
+
+// Takes a card off the queue once its run for the workflow has started.
+export function takeHandoff(configDir: string, card: string, workflow: string): void {
+  const queue = readHandoffs(configDir);
+  const left = queue.filter((h) => !(h.card === card && h.workflow === workflow));
+  if (left.length !== queue.length) writeHandoffs(configDir, left);
+}
+
+// When a run that ended without finishing last showed signs of life: its last
+// step's end or start, else its start.
+export function lastSeen(run: RunRecord): string {
+  const last = run.steps.at(-1);
+  return last?.endedAt ?? last?.startedAt ?? run.startedAt;
+}
+
+export const STOPPED_REASON = 'The run stopped without finishing: its process ended before it could record an outcome.';
+
+// Closes runs that say "running" while no live run holds them: their process
+// is gone, so they failed. `live` is the run folders live runs hold, and
+// `cards` the cards of live runs whose lock names no folder. Returns the cards closed.
+export function closeStale(configDir: string, live: { runDir?: string; card?: string }[]): string[] {
+  const closed: string[] = [];
+  for (const e of listRuns(configDir)) {
+    const r = e.record;
+    if (!r || r.outcome !== 'running') continue;
+    if (live.some((l) => (l.runDir ? l.runDir === e.dir : l.card === e.card))) continue;
+    const steps = r.steps.map((s) => (s.endedAt ? s : { ...s, endedAt: lastSeen(r), result: s.result ?? 'stopped' }));
+    try {
+      writeRun(e.dir, { ...r, steps, outcome: 'failed', reason: r.reason ?? STOPPED_REASON, endedAt: lastSeen({ ...r, steps }) });
+      closed.push(e.card);
+    } catch {
+      // the folder is gone
+    }
+  }
+  return closed;
 }

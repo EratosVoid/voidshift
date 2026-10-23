@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import React from 'react';
 import { render } from 'ink-testing-library';
-import { awakeLines, checksLines, checksView, clampFocus, countsLine, Home, homeHints, liveCard, liveCards, memoryLines, nextSection, parkedRows, runnerLines, sectionsFor } from '../src/tui/home.ts';
+import { awakeLines, checksLines, checksView, clampFocus, countsLine, Home, homeHints, liveCard, liveCards, memoryLines, jobRows, nextSection, parkedRows, runnerLines, sectionsFor } from '../src/tui/home.ts';
 import { emptyState, runsThisWeek, updateNotice, type AgentsStatus, type DataState, type RunItem } from '../src/tui/data.ts';
 import { barParts, cycle, editText, fitCell } from '../src/tui/widgets.ts';
 import { duration, minutesText, secondsToNextCheck, truncate } from '../src/tui/format.ts';
@@ -151,9 +151,28 @@ test('parked and interrupted cards are what r can retry', () => {
   assert.match(parkedRows(agents)[0]!.text, /^parked: checks still failed/);
 });
 
+test('failed cards are retryable rows, one per card', () => {
+  const a: AgentsStatus = { ...agents, failed: [{ card: 'ENG-1500', reason: 'process died' }, { card: 'ENG-1407' }] };
+  assert.deepEqual(parkedRows(a).map((p) => [p.card, p.kind]), [['ENG-1407', 'parked'], ['ENG-1500', 'failed'], ['ENG-1399', 'interrupted']]);
+  assert.equal(parkedRows(a)[1]!.text, 'failed: process died');
+});
+
+test('job lines show the last good run, or a yellow failure', () => {
+  const job = { workflow: 'scout', schedule: '0 */6 * * *', task: 't', last: { at: iso(10), outcome: 'verified' }, lastOkAt: iso(10), today: { runs: 3, failed: 0, handed: 2 } };
+  const a: AgentsStatus = { ...agents, jobs: [job, { ...job, workflow: 'sweep', last: { at: iso(5), outcome: 'failed', reason: 'process died' } }] };
+  const rows = jobRows(a);
+  assert.match(rows[0]!.text, /^scout {2}cron 0 \*\/6 \* \* \* {2}last ok \d\d:\d\d · 3 today · 2 handed$/);
+  assert.equal(rows[0]!.bad, false);
+  assert.match(rows[1]!.text, /^! sweep last failed \d\d:\d\d: process died$/);
+  assert.equal(rows[1]!.bad, true);
+  assert.deepEqual(jobRows(agents), []);
+});
+
 test('counts line and weekly run count', () => {
   assert.equal(runsThisWeek(runs, NOW), 1);
   assert.equal(countsLine(agents, runs, NOW), '1 workflow · 2 projects · 1 run this week');
+  const cron: RunItem = { ...runs[0]!, dir: '/r/cron', record: { ...runs[0]!.record!, source: 'cron' } };
+  assert.equal(countsLine(agents, [...runs, cron], NOW), '1 workflow · 2 projects · 1 run this week');
 });
 
 test('awake lines for on, off and held by another tool', () => {

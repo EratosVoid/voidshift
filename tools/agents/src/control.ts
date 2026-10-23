@@ -3,7 +3,7 @@ import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, r
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 import { DEFAULTS, agentsDir, isCardTrigger, readAgentsConfig, workspaceOf, workspacesInUse, type AgentsConfig, type Tracker as Kind } from './config.ts';
-import { isPaused, listRuns, ours, clearLock, liveCurrent, liveRuns, readCurrent, readWindow, setPaused, usageText, workspaceLocks, writeRun, type Current, type RunEntry } from './state.ts';
+import { STOPPED_REASON, isPaused, lastSeen, listRuns, ours, clearLock, liveCurrent, liveRuns, readCurrent, readWindow, setPaused, usageText, workspaceLocks, writeRun, type Current, type RunEntry } from './state.ts';
 import { windowHold, windowLine } from './usage.ts';
 import { runnerService } from './service.ts';
 import { TRACKERS, trackersFor, type Tracker, type Trackers } from './tracker.ts';
@@ -93,12 +93,15 @@ export function countRounds(steps: { result?: string }[]): number {
 export const isInterrupted = (e: RunEntry, live: Current[]): boolean =>
   e.record?.outcome === 'running' && !live.some((l) => (l.runDir ? l.runDir === e.dir : l.card === e.card));
 
+// The record's outcome, except a run cut off without a live process, which failed.
+export const shownOutcome = (e: RunEntry, live: Current[]): string => (isInterrupted(e, live) ? 'failed' : e.record!.outcome);
+
 export function formatRunLine(e: RunEntry, now = Date.now(), live: Current[] = []): string {
   const r = e.record;
   if (!r) return `${e.card}  ${when(stampDate(e.stamp))}  older run, logs only (${plural(e.logs.length, 'log')})`;
   const rounds = countRounds(r.steps);
-  const end = r.endedAt ? Date.parse(r.endedAt) : now;
-  const parts = [e.card, when(new Date(r.startedAt)), r.workflow, r.steps.map((s) => s.label).join(' → '), isInterrupted(e, live) ? 'interrupted' : r.outcome];
+  const end = r.endedAt ? Date.parse(r.endedAt) : isInterrupted(e, live) ? Date.parse(lastSeen(r)) : now;
+  const parts = [e.card, when(new Date(r.startedAt)), r.workflow, r.steps.map((s) => s.label).join(' → '), shownOutcome(e, live)];
   if (rounds) parts.push(plural(rounds, 'round'));
   parts.push(formatDuration(end - Date.parse(r.startedAt)));
   return parts.join('  ');
@@ -132,7 +135,7 @@ const readLog = (configDir: string) => {
 };
 
 const USAGE: Record<string, string> = {
-  status: 'status [--json]   Runner, the card each workspace is on, parked cards and workflows',
+  status: 'status [--json]   Runner, the card each workspace is on, failed and parked cards, scheduled jobs and workflows',
   start: 'start   Start the background runner',
   stop: 'stop   Stop the runner and cancel the cards it is working on',
   restart: 'restart   Stop and start the runner',
@@ -141,7 +144,7 @@ const USAGE: Record<string, string> = {
   run: 'run [CARD] [--workflow W] [--from STEP]   Run now instead of waiting for the next minute; a named card skips the pause, the cap and the window hold',
   cancel: 'cancel [CARD]   Stop a card being worked on and clear its labels',
   retry: 'retry CARD [--workflow W]   Queue a parked or cancelled card again',
-  runs: 'runs [CARD] [--limit N] [--json]   Past runs, newest first',
+  runs: 'runs [CARD] [--limit N] [--jobs] [--json]   Past runs, newest first; --jobs lists scheduled runs only',
   show: 'show CARD [--json]   Steps, outcome and labels of the latest run',
   logs: 'logs [CARD] [--step N] [-f] [--lines N]   Runner log, or a card\'s step logs',
   clean: 'clean [--older 14d] [--yes]   Remove old worktrees and run folders',
@@ -313,6 +316,53 @@ export function workspaceLines(workspaces: string[], running: (Current & { elaps
   return names.map((ws) => `  ${ws}:${workingLine(running.find((r) => workspaceOf(r) === ws) ?? null) || ' idle.'}`);
 }
 
+interface JobSummary {
+  workflow: string;
+  schedule: string;
+  task: string;
+  last: { at: string; outcome: string; reason?: string; summary?: string } | null;
+  lastOkAt: string | null;
+  today: { runs: number; failed: number; handed: number };
+}
+
+// One entry per cron trigger: its newest run, last success and today's counts.
+export function jobSummaries(config: Pick<AgentsConfig, 'workflows'>, all: RunEntry[], live: Current[], now = Date.now()): JobSummary[] {
+  const day = new Date(now).toDateString();
+  const jobs: JobSummary[] = [];
+  for (const [workflow, w] of Object.entries(config.workflows)) {
+    for (const t of w.triggers) {
+      if (t.source !== 'cron') continue;
+      const mine = all.filter((e) => e.record?.source === 'cron' && e.record.workflow === workflow && e.record.trigger === t.schedule);
+      const newest = mine[0];
+      const r = newest?.record;
+      const ok = mine.find((e) => e.record!.outcome === 'done' || e.record!.outcome === 'verified');
+      const todays = mine.filter((e) => new Date(e.record!.startedAt).toDateString() === day);
+      jobs.push({
+        workflow,
+        schedule: t.schedule,
+        task: t.task,
+        last: r ? { at: r.endedAt ?? r.startedAt, outcome: shownOutcome(newest!, live), reason: r.reason, summary: r.steps.at(-1)?.summary } : null,
+        lastOkAt: ok?.record!.startedAt ?? null,
+        today: {
+          runs: todays.length,
+          failed: todays.filter((e) => ['failed', 'parked'].includes(shownOutcome(e, live))).length,
+          handed: todays.reduce((n, e) => n + e.record!.steps.reduce((m, s) => m + (s.handoffs?.length ?? 0), 0), 0),
+        },
+      });
+    }
+  }
+  return jobs;
+}
+
+// The status line for one job.
+function jobLine(j: JobSummary): string {
+  const bad = j.last?.outcome === 'failed' || j.last?.outcome === 'parked';
+  const head = bad
+    ? `last failed ${clock(new Date(j.last!.at))}${j.last!.reason ? ` (${j.last!.reason.replace(/\.$/, '')})` : ''}`
+    : `last ok ${j.lastOkAt ? clock(new Date(j.lastOkAt)) : 'never'}`;
+  return `Job ${j.workflow} (cron ${j.schedule}): ${head}, ${plural(j.today.runs, 'run')} today, ${j.today.failed} failed, ${j.today.handed} handed.`;
+}
+
 const status = guard(async (args, ctx) => {
   const p = parse('status', args, { json: { type: 'boolean' } }, ctx);
   if (typeof p === 'number') return p;
@@ -327,13 +377,17 @@ const status = guard(async (args, ctx) => {
   const current = running.length ? { ...running[0]!, checking: false } : dispatcher ? { ...dispatcher, checking: true, elapsedMinutes: elapsed(dispatcher) } : null;
   const seen = new Set<string>();
   const parked: { card: string; reason?: string }[] = [];
+  const failed: { card: string; reason?: string }[] = [];
   const interrupted: string[] = [];
-  for (const e of listRuns(ctx.configDir)) {
-    if (e.record?.outcome === 'running' && isInterrupted(e, live)) interrupted.push(e.card);
-    if (seen.has(e.card)) continue;
+  const all = listRuns(ctx.configDir);
+  for (const e of all) {
+    if (e.record?.source === 'cron' || seen.has(e.card)) continue;
     seen.add(e.card);
     if (e.record?.outcome === 'parked') parked.push({ card: e.card, reason: e.record.reason });
+    else if (e.record?.outcome === 'failed') failed.push({ card: e.card, reason: e.record.reason });
+    else if (isInterrupted(e, live)) failed.push({ card: e.card, reason: e.record?.reason ?? STOPPED_REASON });
   }
+  const jobs = jobSummaries(config, all, live);
   const workflows = Object.keys(config.workflows).length;
   const projects = Object.keys(config.projects).length;
   const pauseAt = config.pauseAt ?? DEFAULTS.pauseAt!;
@@ -341,7 +395,7 @@ const status = guard(async (args, ctx) => {
   const w = readWindow(ctx.configDir);
   if (p.values.json) {
     const window = w && { ...w, heldUntil: windowHold(w, pauseAt) };
-    ctx.log(JSON.stringify({ engine: config.engine, runner, lastTick, current, running, parked, interrupted, workflows, projects, window, maxRuns }, null, 2));
+    ctx.log(JSON.stringify({ engine: config.engine, runner, lastTick, current, running, parked, failed, interrupted, jobs, workflows, projects, window, maxRuns }, null, 2));
     return 0;
   }
   // One workspace keeps the single line; several get a line each.
@@ -356,8 +410,9 @@ const status = guard(async (args, ctx) => {
   if (windowText) ctx.log(windowText);
   if (maxRuns) ctx.log(`Cap: at most ${plural(maxRuns, 'run')} at once.`);
   if (lastTick) ctx.log(`Last check: ${clock(new Date(lastTick.at))}, ${lastTick.line.replace(/\.$/, '') || 'no details'}.`);
-  for (const card of interrupted) ctx.log(`Interrupted: ${card}. vsf agents retry ${card} to run it again.`);
+  for (const k of failed) ctx.log(`Failed: ${k.card}${k.reason ? ` (${k.reason.replace(/\.$/, '')})` : ''}. vsf agents retry ${k.card} after fixing the cause.`);
   for (const k of parked) ctx.log(`Parked: ${k.card}${k.reason ? ` (${k.reason.replace(/\.$/, '')})` : ''}. vsf agents retry ${k.card} after fixing the cause.`);
+  for (const j of jobs) ctx.log(jobLine(j));
   ctx.log(`${plural(workflows, 'workflow')}, ${plural(projects, 'project')}. vsf agents workflows lists them.`);
   return 0;
 });
@@ -469,6 +524,11 @@ const retry = guard(async (args, ctx) => {
     ctx.log(`${id} is running now. vsf agents cancel ${id} first.`);
     return 1;
   }
+  const latest = listRuns(ctx.configDir, id)[0]?.record;
+  if (latest?.source === 'cron') {
+    ctx.log(`${id} is a scheduled run. vsf agents run --workflow ${latest.workflow} fires it now.`);
+    return 1;
+  }
   const config = readAgentsConfig(ctx.configDir);
   const names = Object.keys(config.workflows);
   let found: Awaited<ReturnType<typeof findCard>>;
@@ -519,13 +579,14 @@ const retry = guard(async (args, ctx) => {
 });
 
 const runs = guard(async (args, ctx) => {
-  const p = parse('runs', args, { limit: { type: 'string' }, json: { type: 'boolean' } }, ctx);
+  const p = parse('runs', args, { limit: { type: 'string' }, jobs: { type: 'boolean' }, json: { type: 'boolean' } }, ctx);
   if (typeof p === 'number') return p;
   const card = p.positionals[0]?.toUpperCase();
   if (p.positionals.length > 1 || (card && !CARD_ID.test(card))) return usageError('runs', ctx, 'Give one card id like ENG-12.');
   const limit = p.values.limit === undefined ? 20 : Number(p.values.limit);
   if (!Number.isInteger(limit) || limit < 1) return usageError('runs', ctx, '--limit needs a whole number above 0.');
-  const entries = listRuns(ctx.configDir, card).slice(0, limit);
+  // A named card lists all its runs; otherwise card runs, or with --jobs scheduled ones.
+  const entries = listRuns(ctx.configDir, card).filter((e) => !!card || (e.record?.source === 'cron') === !!p.values.jobs).slice(0, limit);
   if (p.values.json) {
     ctx.log(JSON.stringify(entries.map((e) => ({ card: e.card, stamp: e.stamp, dir: e.dir, logs: e.logs, record: e.record })), null, 2));
     return 0;
@@ -563,7 +624,7 @@ const show = guard(async (args, ctx) => {
     return 0;
   }
   ctx.log(`${latest.card}  ${latest.title}`);
-  ctx.log(`Workflow ${latest.workflow}, ${isInterrupted(all[0]!, liveRuns(ctx.configDir)) ? 'interrupted' : latest.outcome}${latest.prUrl ? `, PR ${latest.prUrl}` : ''}`);
+  ctx.log(`Workflow ${latest.workflow}, ${shownOutcome(all[0]!, liveRuns(ctx.configDir))}${latest.prUrl ? `, PR ${latest.prUrl}` : ''}`);
   if (labels) ctx.log(`Labels: ${labels.join(', ') || 'none'}`);
   for (const s of latest.steps) {
     const took = s.endedAt ? formatDuration(Date.parse(s.endedAt) - Date.parse(s.startedAt)) : 'running';

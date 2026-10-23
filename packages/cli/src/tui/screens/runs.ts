@@ -44,21 +44,40 @@ export function roundsOf(steps: StepRecord[]): number {
   return first ? steps.filter((s) => s.step === first).length : 0;
 }
 
-export function runMs(run: RunItem, nowMs: number): number | null {
+// How long a run took. A run that is not live and has no end stopped at its
+// last step, never at now.
+export function runMs(run: RunItem, nowMs: number, live: boolean): number | null {
   const rec = run.record;
   if (!rec) return null;
   const start = Date.parse(rec.startedAt);
   if (Number.isNaN(start)) return null;
-  const end = rec.endedAt ? Date.parse(rec.endedAt) : nowMs;
-  return Math.max(0, end - start);
+  const lastStep = rec.steps[rec.steps.length - 1];
+  const endText = rec.endedAt ?? (live ? undefined : (lastStep?.endedAt ?? lastStep?.startedAt ?? rec.startedAt));
+  const end = endText ? Date.parse(endText) : nowMs;
+  return Math.max(0, (Number.isNaN(end) ? start : end) - start);
 }
 
+// The runs the list shows. With a job: that scheduled workflow's runs. Without:
+// no scheduled runs, and one row per card (its latest run). Newest first in, newest first out.
+export function listRuns(runs: RunItem[], job: string | null): RunItem[] {
+  if (job) return runs.filter((r) => r.record?.source === 'cron' && r.record.workflow === job);
+  const seen = new Set<string>();
+  return runs.filter((r) => {
+    if (r.record?.source === 'cron' || seen.has(r.card)) return false;
+    seen.add(r.card);
+    return true;
+  });
+}
+
+// Every non-scheduled run of a card, newest first.
+export const attemptsOf = (runs: RunItem[], card: string): RunItem[] => runs.filter((r) => r.card === card && r.record?.source !== 'cron');
+
 // The outcome shown for a run. A run that says "running" while no live run
-// is on its card was cut off.
+// is on its card was cut off, so it failed.
 export function outcomeOf(run: RunItem, state: Pick<DataState, 'agents'>): string {
   const outcome = run.record?.outcome;
   if (!outcome) return 'old run';
-  if (outcome === 'running' && state.agents && !liveRunsOf(state.agents).some((c) => c.card === run.card)) return 'interrupted';
+  if (outcome === 'running' && state.agents && !liveRunsOf(state.agents).some((c) => c.card === run.card)) return 'failed';
   return outcome;
 }
 
@@ -88,7 +107,7 @@ export function stepMark(step: StepRecord): { glyph: string; colour: string } {
   if (!step.endedAt) return { glyph: '◐', colour: theme.accent };
   const r = (step.result ?? '').toUpperCase();
   if (r === 'FIX') return { glyph: '↻', colour: theme.yellow };
-  if (r === 'BLOCKED') return { glyph: '✗', colour: theme.red };
+  if (r === 'BLOCKED' || r === 'FAILED') return { glyph: '✗', colour: theme.red };
   if (r === 'STOPPED') return { glyph: '-', colour: theme.dim };
   return { glyph: '✓', colour: theme.green };
 }
@@ -241,7 +260,8 @@ export function Runs(props: { params: Record<string, unknown> }): React.ReactEle
   }, []);
 
   const wanted = typeof props.params.card === 'string' ? props.params.card : null;
-  const runs = useMemo(() => filterRuns(state.runs, filter), [state.runs, filter]);
+  const job = typeof props.params.job === 'string' ? props.params.job : null;
+  const runs = useMemo(() => filterRuns(listRuns(state.runs, job), filter), [state.runs, job, filter]);
   let index = selDir ? runs.findIndex((r) => r.dir === selDir) : -1;
   if (index < 0 && !selDir && wanted) index = runs.findIndex((r) => r.card === wanted);
   if (index < 0) index = 0;
@@ -343,16 +363,18 @@ export function Runs(props: { params: Record<string, unknown> }): React.ReactEle
     } else if (action === 'cancel') {
       if (!live) ctx.toast(`${run.card} is not running, so there is nothing to cancel.`, 'info');
       else void ctx.actions.run(cancelSpec(run.card, liveStep));
-    } else if (action === 'retry')
-      void ctx.actions.run({
-        args: ['agents', 'retry', run.card],
-        title: `Retry ${run.card}?`,
-        body: `Queues ${run.card} again. The runner picks it up on its next check.`,
-        confirmLabel: 'Retry card',
-        cancelLabel: 'Cancel',
-        done: `${run.card} queued again`,
-      });
-    else if (action === 'from') {
+    } else if (action === 'retry') {
+      if (record?.source === 'cron') ctx.toast('Scheduled runs are not retried. The job runs again on its schedule.', 'info');
+      else
+        void ctx.actions.run({
+          args: ['agents', 'retry', run.card],
+          title: `Retry ${run.card}?`,
+          body: `Queues ${run.card} again. The runner picks it up on its next check.`,
+          confirmLabel: 'Retry card',
+          cancelLabel: 'Cancel',
+          done: `${run.card} queued again`,
+        });
+    } else if (action === 'from') {
       if (live) ctx.toast(`${run.card} is running. Cancel it first.`, 'info');
       else if (!options.length) ctx.toast('No steps known for this run.', 'info');
       else {
@@ -365,45 +387,61 @@ export function Runs(props: { params: Record<string, unknown> }): React.ReactEle
 
   // ---- layout ----
   const steps = (run ? settledSteps(run, state) : []).slice(-8);
-  const detailRows = Math.max(2, steps.length) + 2 + (record?.outcome === 'parked' && record.reason ? 1 : 0) + (mode === 'pick' ? 2 : 0);
+  const attempts = run && record?.source !== 'cron' ? attemptsOf(state.runs, run.card) : [];
+  const at = attempts.findIndex((r) => r.dir === run?.dir);
+  const attemptNo = attempts.length - Math.max(0, at);
+  const earlier = attempts.slice(Math.max(0, at) + 1, Math.max(0, at) + 4);
+  const detailRows = Math.max(2, steps.length) + 2 + (attempts.length > 1 ? 1 + earlier.length : 0) + (record?.outcome === 'parked' || record?.outcome === 'failed' || record?.outcome === 'running' ? 1 : 0) + (mode === 'pick' ? 2 : 0);
   const listSize = Math.max(3, ctx.rows - 5 - 3 - (detailRows + 2));
   start.current = windowStart(runs.length, index, listSize, start.current);
   const shown = runs.slice(start.current, start.current + listSize);
   const wide = ctx.columns >= 96;
+  const maxRoundsOf = (r: RunItem) => state.workflows.find((w) => w.name === r.record?.workflow)?.maxRounds ?? 0;
+  const roundsText = (r: RunItem) => (maxRoundsOf(r) > 1 ? `${roundsOf(r.record?.steps ?? [])}/${maxRoundsOf(r)}` : '');
+  const showRounds = shown.some((r) => roundsText(r) !== '');
+  const cardWidth = Math.max(8, Math.min(18, Math.max(0, ...shown.map((r) => r.card.length)) + 2));
   const rows: Cell[][] = shown.map((r) => {
     const outcome = outcomeOf(r, state);
-    const ms = runMs(r, now);
+    const ms = runMs(r, now, isLive(r, state));
     return [
       { text: r.card, bold: true },
       startedText(r),
       r.record?.workflow ?? '',
       stepsLabel(r.record?.steps ?? []),
-      { text: outcome, colour: outcome === 'interrupted' ? theme.yellow : outcomeColour(outcome) },
-      String(roundsOf(r.record?.steps ?? [])),
+      { text: outcome, colour: outcomeColour(outcome) },
+      ...(showRounds ? [roundsText(r)] : []),
       ms === null ? '' : duration(ms),
     ];
   });
   const cols = [
-    { title: 'CARD', width: 10 },
+    { title: 'CARD', width: cardWidth },
     { title: 'STARTED', width: 14 },
     { title: 'WORKFLOW', width: wide ? 20 : 14 },
     { title: 'STEPS', width: wide ? 14 : 12 },
     { title: 'OUTCOME', width: 12 },
-    { title: 'ROUNDS', width: 8 },
+    ...(showRounds ? [{ title: 'ROUNDS', width: 8 }] : []),
     { title: 'TIME' },
   ];
   const empty = !state.loaded ? 'Loading...' : filter ? `No runs match "${filter}".` : 'No runs yet. They appear here when a card is picked up.';
-  const title = filter && mode !== 'filter' ? `Runs matching "${filter}"` : 'Runs, newest first';
+  const title = filter && mode !== 'filter' ? `Runs matching "${filter}"` : job ? `${job} runs, newest first` : 'Runs, newest first';
 
   const detail: Line[] = steps.map((s) => stepLine(s, now));
   if (record && !steps.length) detail.push([seg('No steps yet.', theme.dim)]);
-  if (record?.outcome === 'parked' && record.reason) detail.push([seg('Parked: ', theme.yellow), seg(truncate(record.reason, 300))]);
+  const shownAs = run ? outcomeOf(run, state) : '';
+  const why = shownAs === 'failed' ? (record?.reason ?? 'The run stopped without finishing.') : record?.reason;
+  if ((shownAs === 'parked' || shownAs === 'failed') && why) detail.push([seg(shownAs === 'failed' ? 'Failed: ' : 'Parked: ', shownAs === 'failed' ? theme.red : theme.yellow), seg(truncate(why, 300))]);
+  if (attempts.length > 1) {
+    detail.push([seg(`Attempt ${attemptNo} of ${attempts.length}`, theme.dim)]);
+    for (const a of earlier) {
+      const ms = runMs(a, now, isLive(a, state));
+      detail.push([seg(`${startedText(a)}  ${outcomeOf(a, state)}  ${ms === null ? '' : duration(ms)}`, theme.dim)]);
+    }
+  }
   if (record) {
     detail.push([]);
     const tail: Line = [];
     if (record.prUrl) tail.push(seg('PR ', theme.dim), seg(record.prUrl.replace(/^https?:\/\//, ''), theme.accent), seg('   '));
     if (labels) tail.push(seg('labels ', theme.dim), seg(labels.join(' ') || 'none'));
-    else if (!record.prUrl) tail.push(seg('No PR yet', theme.dim));
     detail.push(tail);
   } else if (run) detail.push([seg('This run has logs only. Enter opens them.', theme.dim)]);
 

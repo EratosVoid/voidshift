@@ -125,7 +125,7 @@ const DAY = 86_400_000;
 const localDay = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
 // Runs ended since the last summary (or the last day), counted by outcome,
-// with the pull requests and parked cards.
+// with the pull requests and the parked or failed cards.
 export function summaryMessage(configDir: string, since: Date, paused: boolean): string | null {
   const runs = listRuns(configDir)
     .map((e) => e.record)
@@ -134,11 +134,11 @@ export function summaryMessage(configDir: string, since: Date, paused: boolean):
   const counts = new Map<string, number>();
   for (const r of runs) counts.set(r!.outcome, (counts.get(r!.outcome) ?? 0) + 1);
   const prs = runs.filter((r) => r!.outcome === 'verified' && r!.prUrl).slice(0, 10);
-  const parked = runs.filter((r) => r!.outcome === 'parked').slice(0, 10);
+  const parked = runs.filter((r) => r!.outcome === 'parked' || r!.outcome === 'failed').slice(0, 10);
   const lines = [`**Daily summary** ${[...counts].map(([o, n]) => `${n} ${o}`).join(', ')}`];
   if (paused) lines.push('Runner paused');
   if (prs.length) lines.push('PRs:', ...prs.map((r) => `${r!.card} ${r!.prUrl}`));
-  if (parked.length) lines.push('Parked:', ...parked.map((r) => `${r!.card} ${r!.title}${r!.reason ? `: ${r!.reason.slice(0, 120)}` : ''}`));
+  if (parked.length) lines.push('Parked or failed:', ...parked.map((r) => `${r!.card} ${r!.title}${r!.reason ? `: ${r!.reason.slice(0, 120)}` : ''}`));
   return lines.join('\n');
 }
 

@@ -317,7 +317,7 @@ test('a parked run and an unexpected error each ping once, as parked and failed'
   const repo = mkdtempSync(join(tmpdir(), 'vsf-repo-'));
   mkdirSync(join(repo, '.git'));
   rc.config.projects.p = { path: repo };
-  assert.equal(await runCard(card(['a']), wf('a').triggers[0]!, 'one', wf('a'), rc.config.projects.p, rc), 'parked');
+  assert.equal(await runCard(card(['a']), wf('a').triggers[0]!, 'one', wf('a'), rc.config.projects.p, rc), 'failed');
   assert.deepEqual(kinds, ['parked ENG-1 one The project folder /nonexistent is not a git repository on this Mac.', 'failed ENG-1 one Something went wrong: stop']);
 });
 
