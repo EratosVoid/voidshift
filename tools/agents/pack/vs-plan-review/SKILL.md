@@ -41,7 +41,8 @@ main points.
 2. The findings that change what gets built, most important first, at most 5,
    one short plain line each: what is wrong and what to do about it.
 3. Everything smaller in one line: `Minor: ...`.
-4. A short `Details` section: for each finding, the file and line that proves it.
+4. A short `Details` section: one line per finding, the file and line that
+   proves it.
 5. Last line, exactly one of:
 
 ```
@@ -56,6 +57,7 @@ fixes to the plan file.
 
 - No em dashes or en dashes.
 - No narration of process. State findings.
+- Whole review under 300 words.
 
 ## When you run inside a workflow
 
