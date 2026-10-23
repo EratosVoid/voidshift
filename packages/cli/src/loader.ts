@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { ToolEntry } from './registry.ts';
-import type { Tool } from './tool.ts';
+import { CONTRACT, type Tool } from './tool.ts';
 
 // Inside the monorepo, tools load straight from source. Installed copies
 // live under <configDir>/tools, one npm prefix shared by every tool.
@@ -41,5 +41,7 @@ export async function loadTool(entry: ToolEntry, configDir: string): Promise<Too
   const path = locate(entry, configDir) ?? (fetchTool(entry, configDir) ? locate(entry, configDir) : null);
   if (!path) throw new Error(`could not download ${entry.pkg}. Check your connection and run vsf setup again.`);
   const mod = (await import(pathToFileURL(path).href)) as { default: Tool };
+  const contract = mod.default.contract ?? 1;
+  if (contract > CONTRACT) throw new Error(`${entry.name} needs a newer vsf (it uses tool contract ${contract}, this vsf knows ${CONTRACT}). Run vsf update.`);
   return mod.default;
 }

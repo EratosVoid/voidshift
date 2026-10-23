@@ -180,8 +180,12 @@ pnpm test
 node packages/cli/src/main.ts
 ```
 
-Node 22.18 or newer runs the TypeScript sources directly. Releases are cut by
-pushing a `v*` tag; CI publishes every package at that version.
+Node 22.18 or newer runs the TypeScript sources directly. Each package
+releases on its own: bump its `package.json` and push `agents-v0.5.0` (or
+`cli-v`, `memory-v`, `awake-v`), and CI publishes only that package. A plain
+`v*` tag publishes all four at one version. Tools declare the CLI contract
+they were built for; a CLI that is too old refuses to load them and says to
+run `vsf update`.
 
 ## License
 

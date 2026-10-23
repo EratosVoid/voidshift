@@ -186,6 +186,7 @@ async function toggle(mode: 'on' | 'off', args: string[], ctx: ToolContext): Pro
 
 const memory: Tool = {
   name: 'memory',
+  contract: 1,
   summary: 'Markdown memory vault recalled into Claude Code and Codex',
 
   async install(ctx) {

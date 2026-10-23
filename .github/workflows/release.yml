@@ -1,9 +1,11 @@
 name: Release
 
-# Push a tag like v0.2.0 to publish every package at that version.
+# Each package releases on its own: push agents-v0.4.6 to publish only the
+# agents tool at 0.4.6, or cli-v / memory-v / awake-v likewise. A plain
+# v0.4.6 tag still publishes every package at that version.
 on:
   push:
-    tags: ['v*']
+    tags: ['v*', 'cli-v*', 'agents-v*', 'memory-v*', 'awake-v*']
 
 permissions:
   contents: read
@@ -25,20 +27,31 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm test
-      - name: Tag matches every package version
+      - name: Packages this tag releases
+        id: pick
         run: |
-          tag="${GITHUB_REF_NAME#v}"
-          for dir in packages/cli tools/awake tools/agents tools/memory; do
+          tag="$GITHUB_REF_NAME"
+          case "$tag" in
+            cli-v*) dirs="packages/cli"; version="${tag#cli-v}" ;;
+            agents-v*) dirs="tools/agents"; version="${tag#agents-v}" ;;
+            memory-v*) dirs="tools/memory"; version="${tag#memory-v}" ;;
+            awake-v*) dirs="tools/awake"; version="${tag#awake-v}" ;;
+            v*) dirs="tools/awake tools/agents tools/memory packages/cli"; version="${tag#v}" ;;
+            *) echo "unknown tag $tag"; exit 1 ;;
+          esac
+          for dir in $dirs; do
             v=$(node -p "require('./$dir/package.json').version")
-            [ "$v" = "$tag" ] || { echo "$dir is $v, tag is $tag"; exit 1; }
+            [ "$v" = "$version" ] || { echo "$dir is $v, tag is $tag"; exit 1; }
           done
+          echo "dirs=$dirs" >> "$GITHUB_OUTPUT"
       - run: pnpm release:prepare
       - name: Publish
         # NPM_TOKEN is only needed until a package has a trusted publisher on npm.
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          DIRS: ${{ steps.pick.outputs.dirs }}
         run: |
-          for dir in tools/awake tools/agents tools/memory packages/cli; do
+          for dir in $DIRS; do
             name=$(node -p "require('./$dir/package.json').name")
             v=$(node -p "require('./$dir/package.json').version")
             # A new package is published by hand once; skip what is already out.
