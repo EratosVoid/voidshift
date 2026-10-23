@@ -15,6 +15,8 @@ export interface RunOptions {
   timeoutMs?: number;
   // Memory vault the agent may write notes into.
   vault?: string;
+  // Claude settings from your profile, passed with --settings.
+  settingsFile?: string;
 }
 
 // Tools a write step may use under `claude -p`. Anything else is denied,
@@ -30,6 +32,7 @@ export function engineArgs(o: RunOptions, outFile: string): { cmd: string; args:
     if (o.vault) args.push('--add-dir', o.vault);
     if (o.write) args.push('--permission-mode', 'acceptEdits');
     if (o.model) args.push('--model', o.model);
+    if (o.settingsFile) args.push('--settings', o.settingsFile);
     return { cmd: 'claude', args };
   }
   const args = ['exec', '-C', o.cwd, '-s', o.write ? 'workspace-write' : 'read-only', '-o', outFile];

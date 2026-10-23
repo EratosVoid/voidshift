@@ -366,3 +366,19 @@ test('--from a custom step on a card picked by its trigger', async () => {
   assert.equal(rig.calls().length, 1);
   assert.match(rig.calls()[0]!.stdin, /Write the morning brief\./);
 });
+
+test('a broken profile settings file parks the run with a clear reason', async () => {
+  const { rc, logs } = rcWith({ nightly: flow([{ source: 'cron', schedule: '0 5 * * *', task: 'Tidy up' }]) }, {});
+  const repo = mkdtempSync(join(tmpdir(), 'vsf-repo-'));
+  const { spawnSync } = await import('node:child_process');
+  spawnSync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+  rc.config.projects.p = { path: repo, base: 'main' };
+  const { profileDir } = await import('../src/profile.ts');
+  const { writeFileSync: write } = await import('node:fs');
+  mkdirSync(profileDir(rc.configDir), { recursive: true });
+  write(join(profileDir(rc.configDir), 'claude-settings.json'), '{ nope');
+  const { runCard } = await import('../src/runner.ts');
+  const wf = rc.config.workflows.nightly!;
+  assert.equal(await runCard(cronCard('nightly', 'Tidy up', new Date()), wf.triggers[0]!, 'nightly', wf, rc.config.projects.p, rc), 'parked');
+  assert.ok(logs.some((l) => /parked: Your agent profile's Claude settings are broken/.test(l)), logs.join('\n'));
+});

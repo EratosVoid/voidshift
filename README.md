@@ -133,6 +133,20 @@ vsf memory on | off        # turn recall on or off
 Setup creates a vault at `~/memory` or uses one you already have. Codex asks you
 to trust the recall hook once: run `/hooks` in Codex.
 
+### Your profile
+
+Every agent run carries your profile, on any machine, without touching your
+Claude or Codex folder. `vsf agents profile init` creates
+`~/.config/voidshift/agents/profile/`:
+
+- `RULES.md` is added to every step's prompt (style, commit rules, tone).
+- `claude-settings.json` is passed to Claude runs with `--settings`, so hooks
+  come along. `{{profile}}` stands for the folder, so hook scripts can live in it.
+
+Setup also asks what the runner does to agent commits before it pushes them:
+remove AI co-author lines, and add `Signed-off-by` for repos that ask for a
+DCO. Only the new commits of that step are rewritten, never pushed ones.
+
 ## What to know
 
 - **Your own logins.** Agents run the official `claude` and `codex` CLIs you

@@ -19,10 +19,11 @@ import {
 import { agentsDir, hasWork, isCardTrigger, resolveStep, stepId, stepIdLabel, type AgentsConfig, type ResolvedStep, type Workflow, type Project, type Trigger } from './config.ts';
 import { lastDue, parseCron } from './cron.ts';
 import { runAgent, stopAgents } from './engine.ts';
-import { commitsAhead, defaultBranch, ensureDraftPr, ensureWorktree, headSha, markReady, push, resetWorktree, waitForChecks, waitForPrHead } from './git.ts';
+import { commitsAhead, enforceCommitPolicy, defaultBranch, ensureDraftPr, ensureWorktree, headSha, markReady, push, resetWorktree, waitForChecks, waitForPrHead } from './git.ts';
 import type { Card } from './linear.ts';
 import { noTracker, type Tracker, type Trackers } from './tracker.ts';
 import { recall, vaultPath } from './memory.ts';
+import { claudeSettingsFile, readRules, rulesSection } from './profile.ts';
 import { bootTime, clearCurrent, isPaused, ours, readCurrent, readPending, writeCurrent, writePending, writeRun, readCronState, writeCronState, type Pending, type RunRecord, type StepRecord } from './state.ts';
 
 const stamp = () => new Date().toISOString().replace(/[:.]/g, '-');
@@ -176,7 +177,15 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
     await stage(stageOf(steps[from]!));
     const base = project.base || defaultBranch(project.path);
     const vault = vaultPath(rc.configDir);
-    const known = [recall(rc.selfCommand, rc.configDir, `${workflow.project} ${card.title}\n${card.description ?? ''}`), vault ? memoryNote(vault) : ''].filter(Boolean).join('\n\n');
+    // Your profile rides along on every step: rules in the prompt, Claude settings as a file.
+    let settingsFile: string | undefined;
+    try {
+      settingsFile = claudeSettingsFile(rc.configDir, runDir);
+    } catch (err) {
+      throw new Park(`Your agent profile's Claude settings are broken: ${(err as Error).message}`);
+    }
+    const rules = rulesSection(readRules(rc.configDir));
+    const known = [recall(rc.selfCommand, rc.configDir, `${workflow.project} ${card.title}\n${card.description ?? ''}`), vault ? memoryNote(vault) : '', rules].filter(Boolean).join('\n\n');
     const worktree = join(agentsDir(rc.configDir), 'worktrees', card.identifier);
     ensureWorktree(project.path, worktree, card.branchName, base);
     say(`working in ${worktree} on ${card.branchName}`);
@@ -221,7 +230,7 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
       }
       const log = logFile(def.id);
       const r = await runAgent({
-        engine: def.engine, model: def.model, cwd: worktree, vault, write: def.write, logFile: log, timeoutMs: def.timeoutMs,
+        engine: def.engine, model: def.model, cwd: worktree, vault, settingsFile, write: def.write, logFile: log, timeoutMs: def.timeoutMs,
         prompt: buildPrompt({ skill: def.prompt(), card, plan: planText(), base, round, extra: [known, ciNote, UNATTENDED].filter(Boolean).join('\n\n') }),
       });
       if (def.builtin === 'vs-qa') resetWorktree(worktree);
@@ -275,7 +284,7 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
         const rec = begin(def);
         const log = logFile(def.builtin ? 'plan' : def.id);
         const r = await runAgent({
-          engine: def.engine, model: def.model, cwd: worktree, vault, write: def.write, logFile: log, timeoutMs: def.timeoutMs,
+          engine: def.engine, model: def.model, cwd: worktree, vault, settingsFile, write: def.write, logFile: log, timeoutMs: def.timeoutMs,
           prompt: buildPrompt({ skill: def.prompt(), card, plan: plan ?? '(none yet, you are writing it)', base, round: runs.plan + 1, findings: findings.get(i), extra: [known, UNATTENDED].filter(Boolean).join('\n\n') }),
         });
         const result = parseDevResult(r.output);
@@ -297,7 +306,7 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
         const log = logFile(def.builtin ? 'dev' : def.id);
         const before = headSha(worktree);
         const dev = await runAgent({
-          engine: def.engine, model: def.model, cwd: worktree, vault, write: def.write, logFile: log, timeoutMs: def.timeoutMs,
+          engine: def.engine, model: def.model, cwd: worktree, vault, settingsFile, write: def.write, logFile: log, timeoutMs: def.timeoutMs,
           prompt: buildPrompt({ skill: def.prompt(), card, plan: planText(), base, round: runs.dev + 1, findings: findings.get(i), extra: [known, UNATTENDED].filter(Boolean).join('\n\n') }),
         });
         const result = parseDevResult(dev.output);
@@ -307,6 +316,9 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
         // A round sent back with findings must change something, or QA would
         // just check the same commit again.
         if (runs.dev > 0 && headSha(worktree) === before) throw new Park('The dev agent made no new commits this round.');
+        // Only this round's commits, which are not pushed yet.
+        const fixed = enforceCommitPolicy(worktree, before, config.commits ?? {});
+        if (fixed) say(`applied the commit policy to ${fixed} commit${fixed === 1 ? '' : 's'}`);
         push(worktree, card.branchName);
         prUrl = ensureDraftPr(worktree, card.branchName, base, `${card.identifier}: ${card.title}`, card.url);
         record.prUrl = prUrl;
@@ -318,7 +330,7 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
         const rec = begin(def);
         const log = logFile(def.id);
         const r = await runAgent({
-          engine: def.engine, model: def.model, cwd: worktree, vault, write: def.write, logFile: log, timeoutMs: def.timeoutMs,
+          engine: def.engine, model: def.model, cwd: worktree, vault, settingsFile, write: def.write, logFile: log, timeoutMs: def.timeoutMs,
           prompt: buildPrompt({ skill: def.prompt(), card, plan: plan ?? '(none)', base, round: loops || 1, extra: [known, UNATTENDED].filter(Boolean).join('\n\n') }),
         });
         end(rec, r.ok ? 'done' : 'failed', r.output, log);
