@@ -247,9 +247,10 @@ async function withPath<T>(bin: string, fn: () => Promise<T>): Promise<T> {
 
 const cron: Trigger = { source: 'cron', schedule: '0 5 * * *', task: 'Brief me' };
 
-async function runCron(rig: ReturnType<typeof agentRig>, workflow: Workflow) {
+async function runCron(rig: ReturnType<typeof agentRig>, workflow: Workflow, platform: NodeJS.Platform = 'darwin') {
   const { rc, logs } = rcWith({ w: workflow }, {});
   rc.selfCommand = [];
+  rc.platform = platform;
   rc.config.projects.p = { path: rig.repo, base: 'main' };
   rc.config.folders = { w: rig.defs };
   const outcome = await withPath(rig.bin, () => runCard(cronCard('w', 'Brief me', new Date()), cron, 'w', workflow, rc.config.projects.p!, rc));
@@ -273,6 +274,7 @@ test('the workspace context reaches the step prompt', async () => {
   const workflow: Workflow = { triggers: [cron], steps: [{ id: 'brief', prompt: 'brief.md', output: 'none' }], maxRounds: 1, project: 'p' };
   const { rc, logs } = rcWith({ w: workflow }, {});
   rc.selfCommand = [];
+  rc.platform = 'darwin';
   const root = mkdtempSync(join(tmpdir(), 'vsf-ws-'));
   writeFileSync(join(root, 'CONTEXT.md'), 'Solvia clients ship to staging.\n');
   rc.config.workspaces = { solvia: { root } };
@@ -283,11 +285,11 @@ test('the workspace context reaches the step prompt', async () => {
   assert.match(rig.calls()[0]!.stdin, /# Workspace\n\nSolvia clients ship to staging\./);
 });
 
-test('a custom step that fails parks the run', async () => {
-  const rig = agentRig('exit 3\n');
+test('a custom step that fails parks the run with its stderr', async () => {
+  const rig = agentRig('echo boom >&2; exit 3\n');
   const { outcome, logs } = await runCron(rig, { triggers: [cron], steps: [{ id: 'brief', prompt: 'brief.md', output: 'none' }], maxRounds: 1, project: 'p' });
   assert.equal(outcome, 'parked');
-  assert.ok(logs.some((l) => /The brief step failed or timed out/.test(l)), logs.join('\n'));
+  assert.ok(logs.some((l) => /The brief step failed: boom\. Log: 00-brief\.log/.test(l)), logs.join('\n'));
   assert.ok(!rig.calls()[0]!.argv.includes('acceptEdits'), 'a none step is read only by default');
 });
 
@@ -303,6 +305,58 @@ test('a custom verdict sends FIX back to a custom plan step until the rounds run
   assert.ok(logs.some((l) => /Checks still failed after 2 plan rounds/.test(l)), logs.join('\n'));
   assert.equal(rig.calls().filter((c) => c.stdin.includes('Write a custom plan.')).length, 2);
   assert.equal(rig.calls().filter((c) => c.stdin.includes('Check the custom plan.')).length, 2);
+});
+
+test('on Linux every step skips permissions instead of an allowlist', async () => {
+  const rig = agentRig('echo brief written\n');
+  const { outcome, logs } = await runCron(rig, { triggers: [cron], steps: [{ id: 'brief', prompt: 'brief.md', output: 'none' }], maxRounds: 1, project: 'p' }, 'linux');
+  assert.equal(outcome, 'verified', logs.join('\n'));
+  const { argv, stdin } = rig.calls()[0]!;
+  assert.ok(argv.includes('--dangerously-skip-permissions'));
+  assert.ok(!argv.includes('--allowedTools'));
+  assert.match(stdin, /If the environment stops you/);
+});
+
+test('a verdict step that crashes ends the run as failed, with no Dev round', async () => {
+  const rig = agentRig('echo "out of credits" >&2; exit 3\n');
+  const { outcome, logs } = await runCron(rig, {
+    triggers: [cron],
+    steps: [{ id: 'check', prompt: 'check.md', output: 'verdict' }, { id: 'build', prompt: 'build.md', output: 'commits' }],
+    maxRounds: 3,
+    project: 'p',
+  });
+  assert.equal(outcome, 'parked');
+  assert.equal(rig.calls().length, 1);
+  assert.ok(logs.some((l) => /parked: The check step failed: out of credits/.test(l)), logs.join('\n'));
+});
+
+test('a plan step that crashes pings Discord as failed with its stderr', async () => {
+  const rig = agentRig('echo "bash: rg: command not found" >&2; exit 3\n');
+  const { rc, logs, writes, run } = cardRig(rig, { triggers: [vtTrigger], steps: [{ id: 'plan', prompt: 'plan.md', output: 'plan' }, 'vs-dev'], maxRounds: 2, project: 'p' });
+  rc.platform = 'darwin';
+  const events: { kind: string; reason?: string }[] = [];
+  rc.notify = async (e) => void events.push(e);
+  assert.equal(await run(), 'parked', logs.join('\n'));
+  assert.equal(rig.calls().length, 1);
+  assert.equal(events.length, 1);
+  assert.equal(events[0]!.kind, 'failed');
+  assert.match(events[0]!.reason!, /The plan step failed: bash: rg: command not found\. Log: 00-plan\.log/);
+  assert.ok(writes.some((w) => w.startsWith('comment:**Parked:** The plan step failed')), writes.join('\n'));
+});
+
+test('a read step leaves a clean worktree', async () => {
+  const rig = agentRig('echo stray > stray.txt; echo "VERDICT: SHIP"\n');
+  const { rc, logs } = rcWith({}, {});
+  const workflow: Workflow = { triggers: [cron], steps: [{ id: 'check', prompt: 'check.md', output: 'verdict' }], maxRounds: 1, project: 'p' };
+  rc.selfCommand = [];
+  rc.platform = 'darwin';
+  rc.config.workflows = { w: workflow };
+  rc.config.projects.p = { path: rig.repo, base: 'main' };
+  rc.config.folders = { w: rig.defs };
+  const card = cronCard('w', 'Brief me', new Date());
+  assert.equal(await withPath(rig.bin, () => runCard(card, cron, 'w', workflow, rc.config.projects.p!, rc)), 'verified', logs.join('\n'));
+  const worktree = join(agentsDir(rc.configDir), 'worktrees', card.identifier);
+  assert.equal(spawnSync('git', ['status', '--porcelain'], { cwd: worktree, encoding: 'utf8' }).stdout, '');
 });
 
 test('a custom commits step gets write access by default and its commits count', async () => {
@@ -332,6 +386,7 @@ function cardRig(rig: ReturnType<typeof agentRig>, workflow: Workflow, comments:
   };
   const { rc, logs } = rcWith({ w: workflow }, { voidtrack: tracker });
   rc.selfCommand = [];
+  rc.platform = 'darwin';
   rc.config.projects.p = { path: rig.repo, base: 'main' };
   rc.config.folders = { w: rig.defs };
   const trigger = workflow.triggers[0]!;

@@ -96,3 +96,17 @@ export function lingerCheck(): Check {
     ? { name: 'runner after logout', status: 'ok', detail: 'lingering is on, the runner keeps going after logout and reboot' }
     : { name: 'runner after logout', status: 'warn', detail: 'lingering is off, the runner stops when you log out', fix: `sudo loginctl enable-linger ${user}` };
 }
+
+// Agents run with permissions skipped on Linux, so the runner's user account
+// is the boundary: anything that user can do, an agent can too.
+export function sudoCheck(run: typeof spawnSync = spawnSync, uid = userInfo().uid): Check {
+  const name = 'runner user';
+  const fix = 'Run the runner as a dedicated user with no sudo, holding only the keys it needs.';
+  if (uid === 0) return { name, status: 'fail', detail: 'runs as root; Claude refuses to skip permissions as root', fix };
+  const groups = (run('id', ['-Gn'], { encoding: 'utf8' }).stdout ?? '').toString().split(/\s+/);
+  const admin = groups.some((g) => ['sudo', 'wheel', 'admin'].includes(g));
+  if (admin || run('sudo', ['-n', 'true'], { encoding: 'utf8' }).status === 0) {
+    return { name, status: 'warn', detail: 'the runner user has sudo; anything an agent runs could too', fix };
+  }
+  return { name, status: 'ok', detail: 'no sudo, the account limits what agents can do' };
+}

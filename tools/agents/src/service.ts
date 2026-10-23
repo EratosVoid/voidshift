@@ -27,7 +27,7 @@ const linux: RunnerService = {
   start: (home, program, logPath) => systemd.startRunner(home, program, launchd.runnerEnv(), logPath),
   stop: systemd.stopRunner,
   programArgs: systemd.programArgs,
-  checks: () => [systemd.lingerCheck()],
+  checks: () => [systemd.lingerCheck(), systemd.sudoCheck()],
 };
 
 export const runnerService = (platform: NodeJS.Platform = process.platform): RunnerService => (platform === 'darwin' ? mac : linux);
