@@ -46,9 +46,15 @@ export interface ToolContext {
 
 export type ToolCommand = (args: string[], ctx: ToolContext) => Promise<number>;
 
+// The version of this contract. A tool built for a newer one may call things
+// this CLI does not have, so it is not loaded; tools without the field are 1.
+export const CONTRACT = 1;
+
 export interface Tool {
   name: string;
   summary: string;
+  // The contract version the tool was built against.
+  contract?: number;
   // Interactive setup; safe to run again to reconfigure.
   install(ctx: ToolContext): Promise<void>;
   uninstall(ctx: ToolContext): Promise<void>;

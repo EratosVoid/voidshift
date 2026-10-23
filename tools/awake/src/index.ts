@@ -268,6 +268,7 @@ async function tick(_args: string[], ctx: ToolContext): Promise<number> {
 
 const awake: Tool = {
   name: 'awake',
+  contract: 1,
   summary: 'Keep the Mac running on battery with the lid closed, with guardrails',
 
   async install(ctx) {

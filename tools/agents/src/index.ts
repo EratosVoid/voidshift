@@ -1054,6 +1054,7 @@ const sameModels = (a: AgentsConfig['models'], b: AgentsConfig['models']) => a.d
 
 const agents: Tool = {
   name: 'agents',
+  contract: 1,
   summary: 'Agents for Claude Code and Codex that plan, build and QA Linear cards',
 
   config: {

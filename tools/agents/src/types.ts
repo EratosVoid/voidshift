@@ -48,6 +48,8 @@ export type ToolCommand = (args: string[], ctx: ToolContext) => Promise<number>;
 export interface Tool {
   name: string;
   summary: string;
+  // The CLI contract version this tool is built against.
+  contract?: number;
   // Interactive setup; safe to run again to reconfigure.
   install(ctx: ToolContext): Promise<void>;
   uninstall(ctx: ToolContext): Promise<void>;
