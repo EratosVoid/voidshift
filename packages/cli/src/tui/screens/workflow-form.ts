@@ -9,7 +9,7 @@ import { theme } from '../theme.ts';
 import { Panel, Select, TextInput, type Option } from '../widgets.ts';
 import { tilde } from '../format.ts';
 import type { Screen } from '../screens.ts';
-import { matchWarnings, stepLabel, stepName, triggerText, warningText, sameTriggerLike, type TriggerLike } from './workflows.ts';
+import { matchWarnings, stepLabel, stepName, triggerSpec, triggerText, warningText, sameTriggerLike, type TriggerLike } from './workflows.ts';
 
 const h = React.createElement;
 
@@ -61,7 +61,7 @@ export function formReducer(s: FormState, a: FormAction): FormState {
 }
 
 export function initialForm(w: WorkflowItem | undefined, name: string, projects: string[]): FormState {
-  if (w) return { name, triggers: w.triggers.map((t) => ({ team: t.team, label: t.label })), steps: [...w.steps], project: w.project, rounds: w.maxRounds };
+  if (w) return { name, triggers: w.triggers.map((t) => ({ ...t })), steps: [...w.steps], project: w.project, rounds: w.maxRounds };
   return { name: '', triggers: [], steps: [], project: projects.length === 1 ? projects[0]! : '', rounds: 3 };
 }
 
@@ -118,7 +118,7 @@ export function saveArgs(s: FormState, isNew: boolean, catalog: StepsCatalog | n
     'workflow',
     isNew ? 'add' : 'edit',
     s.name.trim(),
-    ...s.triggers.flatMap((t) => ['--trigger', `${t.team}:${t.label}`]),
+    ...s.triggers.flatMap((t) => ['--trigger', triggerSpec(t)]),
     '--steps',
     s.steps.map((id) => stepName(catalog, id)).join(','),
     '--project',
@@ -130,14 +130,16 @@ export function saveArgs(s: FormState, isNew: boolean, catalog: StepsCatalog | n
 
 export const renameArgs = (from: string, to: string): string[] => ['agents', 'workflow', 'rename', from, to];
 
-// A trigger from the two text fields, or a complaint.
+// A trigger from the two text fields, or a complaint. A team written as
+// voidtrack:ORG is a VoidTrack team; schedules are added with the CLI.
 export function makeTrigger(team: string, label: string): { trigger: TriggerLike } | { error: string } {
-  const t = team.trim().toUpperCase();
+  const voidtrack = /^voidtrack:/i.test(team.trim());
+  const t = team.trim().replace(/^voidtrack:/i, '').toUpperCase();
   const l = label.trim();
-  if (!t) return { error: 'Give the Linear team, like ENG.' };
-  if (t.includes(':') || /\s/.test(t)) return { error: 'The team is a short key like ENG.' };
+  if (!t) return { error: 'Give the team, like ENG, or voidtrack:ORG for VoidTrack.' };
+  if (t.includes(':') || /\s/.test(t)) return { error: 'The team is a short key like ENG, or voidtrack:ORG.' };
   if (!l) return { error: 'Give the label, like vs-plan.' };
-  return { trigger: { team: t, label: l } };
+  return { trigger: { source: voidtrack ? 'voidtrack' : 'linear', team: t, label: l } };
 }
 
 // Warnings for triggers this workflow shares with another. In place when
@@ -380,7 +382,7 @@ function WorkflowForm(props: { params: Record<string, unknown> }): React.ReactEl
         form.triggers.length === 0 ? h(Text, { color: theme.dim }, ' no trigger yet') : null,
         ...form.triggers.map((t, i) => {
           const on = where === 'triggers' && i === tCursor && adding === null;
-          return h(Text, { key: `${t.team}:${t.label}`, backgroundColor: on ? theme.selected : undefined, bold: on, color: on ? theme.bold : undefined }, ` ${triggerText(t)} `);
+          return h(Text, { key: triggerSpec(t), backgroundColor: on ? theme.selected : undefined, bold: on, color: on ? theme.bold : undefined }, ` ${triggerText(t)} `);
         }),
         adding !== null
           ? h(

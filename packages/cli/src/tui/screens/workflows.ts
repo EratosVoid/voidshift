@@ -33,14 +33,22 @@ export function stepName(catalog: StepsCatalog | null, id: string): string {
   return catalog?.steps.find((s) => s.id === id)?.name ?? id.replace(/^vs-/, '');
 }
 
+// A Linear or VoidTrack card trigger (team and label), or a schedule.
 export interface TriggerLike {
-  team: string;
-  label: string;
+  source?: string;
+  team?: string;
+  label?: string;
+  schedule?: string;
+  task?: string;
 }
 
-export const triggerText = (t: TriggerLike): string => `${t.team} + ${t.label}`;
+export const triggerText = (t: TriggerLike): string =>
+  t.source === 'cron' ? `cron ${t.schedule}` : `${t.source === 'voidtrack' ? 'VoidTrack ' : ''}${t.team} + ${t.label}`;
+// The form `--trigger` takes.
+export const triggerSpec = (t: TriggerLike): string =>
+  t.source === 'cron' ? `cron:${t.schedule}:${t.task}` : t.source === 'voidtrack' ? `voidtrack:${t.team}:${t.label}` : `${t.team}:${t.label}`;
 export const triggersText = (triggers: TriggerLike[]): string => triggers.map(triggerText).join(', ');
-export const sameTriggerLike = (a: TriggerLike, b: TriggerLike): boolean => a.team === b.team && a.label === b.label;
+export const sameTriggerLike = (a: TriggerLike, b: TriggerLike): boolean => triggerSpec(a) === triggerSpec(b);
 
 export const stepsText = (catalog: StepsCatalog | null, steps: string[]): string => steps.map((s) => stepLabel(catalog, s)).join(' → ');
 

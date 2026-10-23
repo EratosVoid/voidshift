@@ -17,12 +17,14 @@ import {
   verdictBlock,
   type StepResult,
 } from './workflow.ts';
-import { STEPS, agentsDir, hasWork, isProducer, type AgentsConfig, type Workflow, type Project, type StepId, type Trigger } from './config.ts';
+import { STEPS, agentsDir, hasWork, isCardTrigger, isProducer, type AgentsConfig, type Workflow, type Project, type StepId, type Trigger } from './config.ts';
+import { lastDue, parseCron } from './cron.ts';
 import { runAgent, stopAgents } from './engine.ts';
 import { commitsAhead, defaultBranch, ensureDraftPr, ensureWorktree, headSha, markReady, push, resetWorktree, waitForChecks, waitForPrHead } from './git.ts';
-import type { Card, Linear } from './linear.ts';
+import type { Card } from './linear.ts';
+import { noTracker, type Tracker, type Trackers } from './tracker.ts';
 import { recall, vaultPath } from './memory.ts';
-import { bootTime, clearCurrent, isPaused, ours, readCurrent, readPending, writeCurrent, writePending, writeRun, type Pending, type RunRecord, type StepRecord } from './state.ts';
+import { bootTime, clearCurrent, isPaused, ours, readCurrent, readPending, writeCurrent, writePending, writeRun, readCronState, writeCronState, type Pending, type RunRecord, type StepRecord } from './state.ts';
 
 const packDir = fileURLToPath(new URL('../pack/', import.meta.url));
 const skill = (name: string) => readFileSync(join(packDir, name, 'SKILL.md'), 'utf8');
@@ -33,7 +35,7 @@ class Park extends Error {}
 export interface RunContext {
   configDir: string;
   config: AgentsConfig;
-  linear: Linear;
+  trackers: Trackers;
   log: (line: string) => void;
   // How to run this CLI again, for `vsf memory recall`.
   selfCommand: string[];
@@ -47,7 +49,7 @@ function withLabels(card: Card, drop: (l: string) => boolean, add: string[]): st
 const UNATTENDED = `# Running unattended
 
 You are one step in a workflow. Nobody can answer questions and the
-Linear connection is not available: the card and any plan are included above.
+tracker connection is not available: the card and any plan are included above.
 Do not write plan files; return your output as your final message. Make the
 call the code supports and state it.`;
 
@@ -75,20 +77,23 @@ const isVerdict = (s: StepId) => STEPS[s].output === 'verdict';
 // step that produces something, Plan or Dev, and the workflow continues from
 // there, until everything passes or the loop cap parks the card.
 export async function runCard(card: Card, trigger: Trigger, workflowName: string, workflow: Workflow, project: Project, rc: RunContext, opts: { from?: StepId } = {}): Promise<'verified' | 'changes' | 'parked'> {
-  const { linear, config, log } = rc;
+  const { config, log } = rc;
+  // A scheduled run has no card, so it has nothing to write back to.
+  const linear: Tracker = isCardTrigger(trigger) ? rc.trackers(trigger.source) : noTracker;
+  const label = isCardTrigger(trigger) ? trigger.label : '';
   const runDir = join(agentsDir(rc.configDir), 'runs', card.identifier, stamp());
   mkdirSync(runDir, { recursive: true });
   const say = (line: string) => log(`${card.identifier} ${line}`);
   const steps = workflow.steps;
   const startedAt = new Date().toISOString();
-  const record: RunRecord = { card: card.identifier, title: card.title, url: card.url, workflow: workflowName, trigger: trigger.label, steps: [], outcome: 'running', startedAt };
+  const record: RunRecord = { card: card.identifier, title: card.title, url: card.url || undefined, workflow: workflowName, trigger: label || (trigger.source === 'cron' ? trigger.schedule : ''), source: trigger.source, steps: [], outcome: 'running', startedAt };
   active = { record, runDir };
   const save = () => writeRun(runDir, record);
   save();
   let loops = 0;
   // The lock tells status and cancel what is running.
-  const mark = (step: string) => writeCurrent(rc.configDir, { pid: process.pid, card: card.identifier, title: card.title, workflow: workflowName, step, round: loops, startedAt, runDir });
-  // Written before the first Linear call, so a cancel always knows the card.
+  const mark = (step: string) => writeCurrent(rc.configDir, { pid: process.pid, card: card.identifier, title: card.title, workflow: workflowName, step, round: loops, startedAt, runDir, source: trigger.source });
+  // Written before the first tracker call, so a cancel always knows the card.
   mark('Starting');
   const begin = (step: StepId): StepRecord => {
     const rec: StepRecord = { step, label: STEPS[step].label, startedAt: new Date().toISOString() };
@@ -116,8 +121,8 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
   const setRound = (n: number) => {
     loops = n;
   };
-  const stage = (name: string, round?: number) => linear.setLabels(card, stageLabels(card.labels, trigger.label, name, round));
-  // Linear hears from the runner twice: the plan once it has passed review,
+  const stage = (name: string, round?: number) => linear.setLabels(card, stageLabels(card.labels, label, name, round));
+  // The tracker hears from the runner twice: the plan once it has passed review,
   // and one final comment. Findings stay here until the final one.
   let lastFindings = '';
   let planToPost: string | null = null;
@@ -129,18 +134,19 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
 
   async function park(reason: string): Promise<'parked'> {
     say(`parked: ${reason}`);
-    const comment = `**Parked:** ${reason}${lastFindings ? `\n\n${lastFindings}` : ''}\n\nFix the cause, then add \`${trigger.label}\` again to retry.`;
+    const comment = `**Parked:** ${reason}${lastFindings ? `\n\n${lastFindings}` : ''}\n\nFix the cause, then add \`${label}\` again to retry.`;
     const add = [LABELS.parked, ...(loops ? [LABELS.version(loops)] : [])];
     let commented = false;
     try {
       await postPlan();
       await linear.comment(card, comment);
       commented = true;
-      await linear.setLabels(card, stageLabels(card.labels, trigger.label, LABELS.parked, loops || undefined));
+      await linear.setLabels(card, stageLabels(card.labels, label, LABELS.parked, loops || undefined));
     } catch (err) {
-      say(`could not reach Linear to park it (${(err as Error).message}). Will retry next minute.`);
+      if (!isCardTrigger(trigger)) return done('parked', reason);
+      say(`could not reach ${trigger.source === 'voidtrack' ? 'VoidTrack' : 'Linear'} to park it (${(err as Error).message}). Will retry next minute.`);
       // An empty comment is skipped on retry, so it is not posted twice.
-      writePending(rc.configDir, [...readPending(rc.configDir), { card: card.identifier, comment: commented ? '' : comment, drop: [trigger.label], add, dropStatus: true }]);
+      writePending(rc.configDir, [...readPending(rc.configDir), { card: card.identifier, comment: commented ? '' : comment, drop: [label], add, dropStatus: true, source: trigger.source }]);
     }
     return done('parked', reason);
   }
@@ -149,7 +155,8 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
     if (!existsSync(join(project.path, '.git'))) throw new Park(`The project folder ${project.path} is not a git repository on this Mac.`);
     const from = opts.from ? steps.indexOf(opts.from) : 0;
     if (from < 0) throw new Park(`Workflow ${workflowName} has no ${STEPS[opts.from!].label} step.`);
-    let plan = latestPlan(await linear.comments(card.identifier));
+    // A scheduled run has no card to plan on, so its task is the plan unless a Plan step writes one.
+    let plan = isCardTrigger(trigger) ? latestPlan(await linear.comments(card.identifier)) : card.description ?? null;
     const firstPlan = steps.indexOf('vs-plan', from);
     const needsPlan = steps.findIndex((s, n) => n >= from && (s === 'vs-dev' || s === 'vs-plan-review'));
     if (!plan && needsPlan >= 0 && (firstPlan < 0 || firstPlan > needsPlan)) {
@@ -240,7 +247,7 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
         if (target < 0) {
           await postPlan();
           await linear.comment(card, `**Changes needed.**\n\n${notes}`);
-          await linear.setLabels(card, stageLabels(card.labels, trigger.label, LABELS.changes, round));
+          await linear.setLabels(card, stageLabels(card.labels, label, LABELS.changes, round));
           say('changes requested');
           return done('changes');
         }
@@ -307,7 +314,7 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
       markReady(worktree, card.branchName);
       moved = await linear.moveTo(card, config.reviewState);
     }
-    await linear.setLabels(card, stageLabels(card.labels, trigger.label, LABELS.verified, loops || undefined));
+    await linear.setLabels(card, stageLabels(card.labels, label, LABELS.verified, loops || undefined));
     await linear.comment(card, `**All checks passed.**${prUrl ? ` PR ready: ${prUrl}` : ''}${hasWork(workflow) && !moved ? `\n\n(No "${config.reviewState}" state on this team, so the card was not moved.)` : ''}`);
     say('verified');
     return done('verified');
@@ -319,33 +326,102 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
   }
 }
 
-// The first card waiting on any workflow's triggers, in workflow order.
-// With a workflow name, only that workflow is considered.
-export async function nextJob(rc: RunContext, only?: string, workflowName?: string): Promise<{ card: Card; trigger: Trigger; workflow: string } | null> {
-  const pinned = only ? await rc.linear.card(only) : null;
-  for (const [name, workflow] of Object.entries(rc.config.workflows)) {
-    if (workflowName && name !== workflowName) continue;
-    for (const trigger of workflow.triggers) {
-      const cards = pinned ? [pinned] : await rc.linear.myCardsWithLabel(trigger.label);
-      // A pinned card may have lost its label (a parked card re-run by hand), so match by team.
-      const card = cards.find((c) => c.teamKey === trigger.team && (pinned || c.labels.includes(trigger.label)));
-      if (card) return { card, trigger, workflow: name };
-    }
-  }
-  return null;
+type Job = { card: Card; trigger: Trigger; workflow: string };
+
+// A scheduled run's stand-in for a card: the task, on a branch of its own.
+export function cronCard(workflow: string, task: string, at: Date): Card {
+  const stamp = at.toISOString().slice(0, 16).replace(/[-:T]/g, '');
+  const slug = workflow.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'cron';
+  return {
+    id: '',
+    identifier: `${slug.replace(/-/g, '').toUpperCase()}-${stamp}`,
+    title: task.split('\n')[0]!.slice(0, 80),
+    description: task,
+    url: '',
+    branchName: `vs/${slug}-${stamp}`,
+    teamId: '',
+    teamKey: '',
+    labels: [],
+  };
 }
 
-// Retries Linear writes that failed while parking. Never throws.
+const cronKey = (workflow: string, schedule: string) => `${workflow} ${schedule}`;
+
+// The first job waiting on any workflow's triggers, in workflow order: a card
+// carrying a trigger label, or a schedule that came due since it last fired.
+// A schedule seen for the first time starts counting from now. With a card,
+// only that card is considered; with a workflow name, only that workflow, and
+// `force` fires its schedule now.
+export async function nextJob(rc: RunContext, only?: string, workflowName?: string, opts: { force?: boolean; now?: Date } = {}): Promise<Job | null> {
+  const now = opts.now ?? new Date();
+  const workflows = Object.entries(rc.config.workflows).filter(([name]) => !workflowName || name === workflowName);
+  let pinned: { card: Card; source: string } | null = null;
+  if (only) {
+    const team = only.split('-')[0]!.toUpperCase();
+    const sources = [...new Set(workflows.flatMap(([, w]) => w.triggers.filter(isCardTrigger).filter((t) => t.team === team).map((t) => t.source)))];
+    for (const source of sources) {
+      try {
+        pinned = { card: await rc.trackers(source).card(only), source };
+        break;
+      } catch (err) {
+        if (source === sources.at(-1)) throw err;
+      }
+    }
+    if (!pinned) return null;
+  }
+  const cron = readCronState(rc.configDir);
+  let cronChanged = false;
+  try {
+    for (const [name, workflow] of workflows) {
+      for (const trigger of workflow.triggers) {
+        if (!isCardTrigger(trigger)) {
+          const schedule = only ? null : parseCron(trigger.schedule);
+          if (!schedule) continue;
+          const key = cronKey(name, trigger.schedule);
+          const last = cron[key];
+          const due = opts.force ? now : last ? lastDue(schedule, new Date(last), now) : null;
+          if (!last || due) {
+            cron[key] = now.toISOString();
+            cronChanged = true;
+          }
+          if (due) return { card: cronCard(name, trigger.task, due), trigger, workflow: name };
+          continue;
+        }
+        // A pinned card may have lost its label (a parked card re-run by hand), so match by team.
+        if (pinned) {
+          if (pinned.source === trigger.source && pinned.card.teamKey === trigger.team) return { card: pinned.card, trigger, workflow: name };
+          continue;
+        }
+        let cards: Card[];
+        try {
+          cards = await rc.trackers(trigger.source).myCardsWithLabel(trigger.label, trigger.team);
+        } catch (err) {
+          // One tracker being down or unset must not stop the others.
+          rc.log(`Could not check ${trigger.source === 'voidtrack' ? 'VoidTrack' : 'Linear'} for ${trigger.team} + ${trigger.label} (${(err as Error).message}). Trying again next minute.`);
+          continue;
+        }
+        const card = cards.find((c) => c.teamKey === trigger.team && c.labels.includes(trigger.label));
+        if (card) return { card, trigger, workflow: name };
+      }
+    }
+    return null;
+  } finally {
+    if (cronChanged) writeCronState(rc.configDir, cron);
+  }
+}
+
+// Retries tracker writes that failed while parking. Never throws.
 async function flushPending(rc: RunContext): Promise<void> {
   const left: Pending[] = [];
   for (const p of readPending(rc.configDir)) {
     try {
-      const card = await rc.linear.card(p.card);
+      const tracker = rc.trackers(p.source ?? 'linear');
+      const card = await tracker.card(p.card);
       if (p.comment) {
-        await rc.linear.comment(card, p.comment);
+        await tracker.comment(card, p.comment);
         p.comment = '';
       }
-      await rc.linear.setLabels(card, withLabels(card, (l) => p.drop.includes(l) || (!!p.dropStatus && isStatusLabel(l)), p.add));
+      await tracker.setLabels(card, withLabels(card, (l) => p.drop.includes(l) || (!!p.dropStatus && isStatusLabel(l)), p.add));
     } catch {
       left.push(p);
     }
@@ -357,26 +433,26 @@ async function flushPending(rc: RunContext): Promise<void> {
   }
 }
 
-// Takes the working label off a cancelled card and says so. When Linear
+// Takes the working label off a cancelled card and says so. When the tracker
 // cannot be reached the same change is queued for the next tick.
-export async function cancelCard(linear: Linear, configDir: string, cardId: string, label: string): Promise<boolean> {
+export async function cancelCard(tracker: Tracker, configDir: string, cardId: string, label: string, source: 'linear' | 'voidtrack' = 'linear'): Promise<boolean> {
   const comment = `**Cancelled.** Add \`${label}\` again to restart.`;
   try {
-    const card = await linear.card(cardId);
-    await linear.setLabels(card, withLabels(card, isStatusLabel, []));
-    await linear.comment(card, comment);
+    const card = await tracker.card(cardId);
+    await tracker.setLabels(card, withLabels(card, isStatusLabel, []));
+    await tracker.comment(card, comment);
     return true;
   } catch {
-    queueCancel(configDir, cardId, comment);
+    queueCancel(configDir, cardId, comment, source);
     return false;
   }
 }
 
-function queueCancel(configDir: string, cardId: string, comment: string): void {
+function queueCancel(configDir: string, cardId: string, comment: string, source: 'linear' | 'voidtrack' = 'linear'): void {
   const pending = readPending(configDir);
   if (pending.some((p) => p.card === cardId && p.comment === comment)) return;
   try {
-    writePending(configDir, [...pending, { card: cardId, comment, drop: [], add: [], dropStatus: true }]);
+    writePending(configDir, [...pending, { card: cardId, comment, drop: [], add: [], dropStatus: true, source }]);
   } catch {
     // nothing more to do
   }
@@ -407,12 +483,14 @@ export async function tick(rc: RunContext, only?: string, opts: { workflow?: str
         // the run folder is gone
       }
     }
-    if (running) {
+    if (running && running.record.source !== 'cron') {
       const { card, trigger } = running.record;
+      const source = running.record.source ?? 'linear';
       const timeout = new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 5000).unref());
-      const finished = await Promise.race([cancelCard(rc.linear, rc.configDir, card, trigger), timeout]);
+      const work = (async () => cancelCard(rc.trackers(source), rc.configDir, card, trigger, source))().catch(() => false);
+      const finished = await Promise.race([work, timeout]);
       // Did not finish in time: leave the work for the next tick.
-      if (!finished) queueCancel(rc.configDir, card, `**Cancelled.** Add \`${trigger}\` again to restart.`);
+      if (!finished) queueCancel(rc.configDir, card, `**Cancelled.** Add \`${trigger}\` again to restart.`, source);
     }
     clearCurrent(rc.configDir);
     process.exit(143);
@@ -424,9 +502,9 @@ export async function tick(rc: RunContext, only?: string, opts: { workflow?: str
     if (!only && isPaused(rc.configDir)) return 0;
     let job: Awaited<ReturnType<typeof nextJob>>;
     try {
-      job = await nextJob(rc, only, opts.workflow);
+      job = await nextJob(rc, only, opts.workflow, { force: !!opts.workflow && !only });
     } catch (err) {
-      rc.log(`Could not check Linear (${(err as Error).message}). Trying again next minute.`);
+      rc.log(`Could not read ${only} (${(err as Error).message}).`);
       return 1;
     }
     if (!job) {

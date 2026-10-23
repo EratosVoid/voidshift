@@ -78,7 +78,7 @@ export interface RunItem {
 
 export interface WorkflowItem {
   name: string;
-  triggers: { source: string; team: string; label: string }[];
+  triggers: { source: string; team?: string; label?: string; schedule?: string; task?: string }[];
   steps: string[];
   maxRounds: number;
   project: string;

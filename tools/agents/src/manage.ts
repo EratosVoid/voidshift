@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { AGENTS, STEPS, type AgentsConfig, type StepId, type Trigger, type Workflow } from './config.ts';
+import { AGENTS, STEPS, describeTrigger, triggerSpec, type AgentsConfig, type StepId, type Trigger, type Workflow } from './config.ts';
+import { parseCron } from './cron.ts';
 
 const isInt = (v: unknown, min: number, max: number) => typeof v === 'number' && Number.isInteger(v) && v >= min && v <= max;
 
@@ -9,8 +10,14 @@ export function validateWorkflow(config: Pick<AgentsConfig, 'enabled' | 'project
   const problems: string[] = [];
   if (!workflow.triggers?.length) problems.push('Needs at least one trigger.');
   for (const t of workflow.triggers ?? []) {
-    if (!t.team?.trim()) problems.push('A trigger has no team.');
-    if (!t.label?.trim()) problems.push('A trigger has no label.');
+    if (t.source === 'cron') {
+      if (!parseCron(t.schedule ?? '')) problems.push(`Schedule ${t.schedule} is not a five field cron schedule, like 0 5 * * 1.`);
+      if (!t.task?.trim()) problems.push('A schedule has no task.');
+    } else if (t.source !== 'linear' && t.source !== 'voidtrack') problems.push(`Unknown trigger source ${(t as { source?: string }).source}.`);
+    else {
+      if (!t.team?.trim()) problems.push('A trigger has no team.');
+      if (!t.label?.trim()) problems.push('A trigger has no label.');
+    }
   }
   if (!workflow.steps?.length) problems.push('Needs at least one step.');
   for (const s of workflow.steps ?? []) {
@@ -22,16 +29,28 @@ export function validateWorkflow(config: Pick<AgentsConfig, 'enabled' | 'project
   return problems;
 }
 
-// "ENG:vs-plan" into a trigger; the team is upper-cased.
+export const TRIGGER_FORMS = 'TEAM:LABEL (Linear), voidtrack:TEAM:LABEL, or cron:SCHEDULE:TASK';
+
+// "ENG:vs-plan" (Linear, also "linear:ENG:vs-plan"), "voidtrack:ORG:vs-start"
+// or "cron:0 5 * * 1:Update the dependencies" into a trigger. Teams are
+// upper-cased; a schedule must parse.
 export function parseTrigger(input: string): Trigger | null {
-  const i = input.indexOf(':');
-  if (i < 0) return null;
-  const team = input.slice(0, i).trim().toUpperCase();
-  const label = input.slice(i + 1).trim();
-  return team && label ? { source: 'linear', team, label } : null;
+  const text = input.trim();
+  // A source prefix decides the form; a bare TEAM:LABEL is Linear.
+  if (text.startsWith('cron:')) {
+    const cron = /^cron:([^:]+):([\s\S]+)$/.exec(text);
+    const schedule = cron?.[1]!.trim().replace(/\s+/g, ' ') ?? '';
+    const task = cron?.[2]!.trim() ?? '';
+    return parseCron(schedule) && task ? { source: 'cron', schedule, task } : null;
+  }
+  const m = /^(linear|voidtrack):/.test(text) ? /^(linear|voidtrack):([^:]+):(.+)$/.exec(text) : /^()([^:]+):(.+)$/.exec(text);
+  if (!m) return null;
+  const team = m[2]!.trim().toUpperCase();
+  const label = m[3]!.trim();
+  return team && label ? { source: (m[1] || 'linear') as 'linear' | 'voidtrack', team, label } : null;
 }
 
-export const sameTrigger = (a: Trigger, b: Trigger) => a.team === b.team && a.label === b.label;
+export const sameTrigger = (a: Trigger, b: Trigger) => triggerSpec(a) === triggerSpec(b);
 
 // Warning lines for triggers this workflow shares with another one. Only the
 // first workflow in order starts a card, so the rest never get it.
@@ -42,7 +61,7 @@ export function duplicateTriggerWarnings(workflows: Record<string, Workflow>, na
     const first = owners[0];
     for (const other of owners) {
       if (other === name) continue;
-      lines.push(`Warning: ${other} also starts on ${t.team} + ${t.label}, and ${first} wins. vsf agents workflow move changes the order.`);
+      lines.push(`Warning: ${other} also starts on ${describeTrigger(t)}, and ${first} wins. vsf agents workflow move changes the order.`);
     }
   }
   return lines;

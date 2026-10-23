@@ -50,15 +50,24 @@ Five agents, installed into Claude Code (and Codex if you use it):
 | QA | CI, then code review, then a usability check in a headless browser |
 
 Use them yourself (`/vs-plan ENG-123` in Claude Code), or let a **workflow**
-run them. A workflow starts when one of your Linear cards gets a label, runs
-agents in order in a project (a repo on your Mac), and sends work back to the
-step that made it when a check fails:
+run them. A workflow starts when one of your Linear or VoidTrack cards gets a
+label, or on a schedule, runs agents in order in a project (a repo on your
+machine), and sends work back to the step that made it when a check fails:
 
 ```
 when ENG + vs-plan:  Dev → QA  in tether-relay
 ```
 
-The runner checks Linear every minute, works in its own copy of the repo so
+Triggers, as `--trigger` takes them:
+
+```
+ENG:vs-plan                           # a Linear card in ENG assigned to you gets vs-plan
+voidtrack:ORG:vs-start                # the same for VoidTrack (vsf agents key --voidtrack)
+"cron:0 5 * * 1:Update dependencies"  # every Monday 05:00, no card, on its own branch
+```
+
+A schedule fires once when due (a missed one is made up within a day) and
+`vsf agents run --workflow NAME` fires it now. The runner checks every minute, works in its own copy of the repo so
 your checkout is never touched, and keeps two labels on the card as it goes: the
 stage (`vs-planning`, `vs-plan-review`, `vs-dev`, `vs-qa`, then `vs-qa-verified`
 or `vs-parked`) and the round (`vs-v1`, `vs-v2`). On Linear it posts the plan and
