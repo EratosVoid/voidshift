@@ -71,3 +71,10 @@ export function stopRunner(home: string): void {
   if (runnerLoaded()) launchctl(['bootout', `${domain()}/${LABEL}`]);
   rmSync(plistPath(home), { force: true });
 }
+
+// The <string> values of a launchd plist's ProgramArguments.
+export function parsePlistArgs(plist: string): string[] {
+  const block = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(plist)?.[1] ?? '';
+  const unxml = (s: string) => s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+  return [...block.matchAll(/<string>([\s\S]*?)<\/string>/g)].map((m) => unxml(m[1]!));
+}

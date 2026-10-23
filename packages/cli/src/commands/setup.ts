@@ -2,7 +2,7 @@ import * as p from '@clack/prompts';
 import { baseChecks, run } from '../checks.ts';
 import { context, readConfig, writeConfig } from '../config.ts';
 import { fetchTool, loadTool } from '../loader.ts';
-import { findTool, registry, type ToolEntry } from '../registry.ts';
+import { findTool, registry, unavailable, type ToolEntry } from '../registry.ts';
 import type { ToolContext } from '../tool.ts';
 import { needsTerminal, parseFlags } from './args.ts';
 import { usages } from './help.ts';
@@ -80,18 +80,18 @@ export async function setup(defaults = false): Promise<number> {
   const ctx = context(true, defaults);
   const config = readConfig();
   try {
-    const available = registry.filter((t) => t.status !== 'planned').map((t) => t.name);
+    const available = registry.filter((t) => !unavailable(t)).map((t) => t.name);
     const picked = defaults
-      ? [...new Set([...config.tools, ...available])]
+      ? [...new Set([...config.tools.filter((n) => available.includes(n)), ...available])]
       : await p.multiselect<string>({
           message: 'Which tools do you want?',
           options: registry.map((t) => ({
             value: t.name,
             label: t.name,
-            hint: t.status === 'planned' ? `${t.summary} (coming soon)` : t.summary,
-            disabled: t.status === 'planned',
+            hint: unavailable(t) ? `${t.summary} (${unavailable(t)})` : t.summary,
+            disabled: !!unavailable(t),
           })),
-          initialValues: config.tools,
+          initialValues: config.tools.filter((n) => available.includes(n)),
           required: false,
         });
     if (p.isCancel(picked)) throw (p.cancel('Setup cancelled. Nothing was changed.'), new Cancelled());

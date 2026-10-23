@@ -31,10 +31,11 @@ function firstLine(s: string): string {
 export function baseChecks(platform: string, nodeVersion: string, exec: Run): Check[] {
   const checks: Check[] = [];
 
+  const linux = platform === 'linux';
   checks.push(
-    platform === 'darwin'
-      ? { name: 'macOS', status: 'ok', detail: 'supported' }
-      : { name: 'macOS', status: 'fail', detail: `${platform} is not supported yet`, fix: 'The MVP runs on macOS only' },
+    platform === 'darwin' || linux
+      ? { name: 'platform', status: 'ok', detail: linux ? 'Linux, supported' : 'macOS, supported' }
+      : { name: 'platform', status: 'fail', detail: `${platform} is not supported yet`, fix: 'Run on macOS or Linux' },
   );
 
   checks.push(
@@ -47,7 +48,7 @@ export function baseChecks(platform: string, nodeVersion: string, exec: Run): Ch
   checks.push(
     git.ok
       ? { name: 'git', status: 'ok', detail: git.stdout }
-      : { name: 'git', status: 'fail', detail: 'not found', fix: 'xcode-select --install' },
+      : { name: 'git', status: 'fail', detail: 'not found', fix: linux ? 'Install git with your package manager' : 'xcode-select --install' },
   );
 
   const gh = exec('gh', ['auth', 'token']);
@@ -57,7 +58,7 @@ export function baseChecks(platform: string, nodeVersion: string, exec: Run): Ch
       ? { name: 'GitHub CLI', status: 'ok', detail: 'logged in' }
       : ghInstalled
         ? { name: 'GitHub CLI', status: 'warn', detail: 'not logged in', fix: 'gh auth login' }
-        : { name: 'GitHub CLI', status: 'warn', detail: 'not found', fix: 'brew install gh' },
+        : { name: 'GitHub CLI', status: 'warn', detail: 'not found', fix: linux ? 'https://cli.github.com' : 'brew install gh' },
   );
 
   const claude = exec('claude', ['--version']);

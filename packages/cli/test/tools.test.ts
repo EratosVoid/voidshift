@@ -22,3 +22,11 @@ test('toolUsage hides internal commands', () => {
   assert.match(text, /vsf awake <on>/);
   assert.doesNotMatch(text, /tick|recall/);
 });
+
+test('awake is macOS only, the other tools run on Linux', async () => {
+  const { registry, unavailable } = await import('../src/registry.ts');
+  const awake = registry.find((t) => t.name === 'awake')!;
+  assert.equal(unavailable(awake, 'darwin'), null);
+  assert.equal(unavailable(awake, 'linux'), 'macOS only');
+  for (const t of registry.filter((t) => t.name !== 'awake')) assert.equal(unavailable(t, 'linux'), null);
+});

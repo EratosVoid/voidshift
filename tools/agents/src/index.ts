@@ -6,8 +6,8 @@ import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { AGENTS, STEPS, TEMPLATES, isProducer, agentsDir, describeSteps, describeTriggers, describeWorkflow, stepEnabled, visibleAgents, readAgentsConfig, writeAgentsConfig, DEFAULTS, type AgentsConfig, type Project, type StepId, type Trigger, type Workflow } from './config.ts';
 import { controlChecks, controlCommands, controlUsage } from './control.ts';
-import { looksLikeLinearKey, readLinearKey, storeLinearKey } from './keychain.ts';
-import { startRunner, stopRunner } from './launchd.ts';
+import { keyStore, looksLikeLinearKey, readLinearKey, storeLinearKey } from './secrets.ts';
+import { runnerService } from './service.ts';
 import { createLinear } from './linear.ts';
 import { duplicateTriggerWarnings, moveKey, parseTrigger, renameKey, sameTrigger, validateConfig, validateWorkflow, workflowsUsing, type Place } from './manage.ts';
 import { parseStep, resolveName, stepNames } from './names.ts';
@@ -97,14 +97,14 @@ async function chooseHomes(ui: Ui, configDir: string, saved: Home[]): Promise<Ho
 }
 
 // Checks the key against Linear, and only then stores it.
-async function verifyAndStore(key: string, info: (l: string) => void, warn: (l: string) => void): Promise<string | null> {
+async function verifyAndStore(configDir: string, key: string, info: (l: string) => void, warn: (l: string) => void): Promise<string | null> {
   try {
     const me = await createLinear(key).viewer();
-    if (!storeLinearKey(key)) {
-      warn('Linear accepted the key but the Keychain did not store it.');
+    if (!storeLinearKey(configDir, key)) {
+      warn(`Linear accepted the key but it could not be stored in ${keyStore()}.`);
       return null;
     }
-    info(`Linear connected as ${me.name}. Key stored in your macOS Keychain.`);
+    info(`Linear connected as ${me.name}. Key stored in ${keyStore()}.`);
     return me.name;
   } catch (err) {
     warn(`Linear did not accept that key: ${(err as Error).message}. Nothing was stored.`);
@@ -113,15 +113,15 @@ async function verifyAndStore(key: string, info: (l: string) => void, warn: (l: 
 }
 
 // Asks for the key, checks it against Linear, and only then stores it.
-async function setupKey(ui: Ui): Promise<string | null> {
+async function setupKey(ui: Ui, configDir: string): Promise<string | null> {
   ui.info('Agents need a Linear personal API key (Linear > Settings > Security & access > API keys).');
   const key = await ui.secret('Paste your Linear API key', (v) => (looksLikeLinearKey(v.trim()) ? undefined : 'Linear keys start with lin_api_'));
-  return verifyAndStore(key.trim(), ui.info, ui.warn);
+  return verifyAndStore(configDir, key.trim(), ui.info, ui.warn);
 }
 
-async function currentLinearUser(): Promise<string | null> {
+async function currentLinearUser(configDir: string): Promise<string | null> {
   try {
-    return readLinearKey() ? (await linear().viewer()).name : null;
+    return readLinearKey(configDir) ? (await linear(configDir).viewer()).name : null;
   } catch {
     return null;
   }
@@ -191,8 +191,8 @@ function syncLinks(chosen: Home[], all: Home[], enabled: string[], log: (l: stri
   }
 }
 
-function linear() {
-  const key = readLinearKey();
+function linear(configDir: string) {
+  const key = readLinearKey(configDir);
   if (!key) throw new Error('No Linear API key. Run vsf agents key');
   return createLinear(key);
 }
@@ -537,7 +537,7 @@ function pickWorkflow(config: AgentsConfig, input: string, ctx: ToolContext): st
 
 async function teamsOrNull(ctx: ToolContext): Promise<Team[] | null> {
   try {
-    return await linear().teams();
+    return await linear(ctx.configDir).teams();
   } catch (err) {
     ctx.log(`Could not list Linear teams: ${(err as Error).message}`);
     return null;
@@ -1062,24 +1062,24 @@ const agents: Tool = {
     }
     config.engine = engine;
 
-    const name = await currentLinearUser();
+    const name = await currentLinearUser(ctx.configDir);
     if (!name || !(await ui.confirm(`Keep using Linear as ${name}?`))) {
-      if (!(await setupKey(ui))) throw new Error('Linear is not connected. Run vsf setup agents to retry.');
+      if (!(await setupKey(ui, ctx.configDir))) throw new Error('Linear is not connected. Run vsf setup agents to retry.');
     }
 
     await setupProjects(ui, config, ctx.log);
-    await setupWorkflows(ui, config, await linear().teams(), ctx.log);
+    await setupWorkflows(ui, config, await linear(ctx.configDir).teams(), ctx.log);
     writeAgentsConfig(ctx.configDir, config);
 
     if (Object.keys(config.workflows).length && (await ui.confirm('Start the background runner now? It checks Linear every minute for cards that start your workflows.'))) {
-      const ok = startRunner(ctx.home, [...ctx.selfCommand, 'agents', 'tick'], join(agentsDir(ctx.configDir), 'runner.log'));
+      const ok = runnerService().start(ctx.home, [...ctx.selfCommand, 'agents', 'tick'], join(agentsDir(ctx.configDir), 'runner.log'));
       ctx.log(ok ? 'Runner started.' : 'Could not start the runner. Try vsf agents start.');
     }
     ctx.log('In Claude Code or Codex, connect Linear too, then use /vs-plan, /vs-plan-review and /vs-publish on a card.');
   },
 
   async uninstall(ctx) {
-    stopRunner(ctx.home);
+    runnerService().stop(ctx.home);
     syncLinks([], candidateHomes(ctx.configDir, readAgentsConfig(ctx.configDir).homes), [], ctx.log);
     ctx.log('Agents unlinked and the runner stopped. Config and the Linear key were kept.');
   },
@@ -1099,7 +1099,7 @@ const agents: Tool = {
       );
     }
     try {
-      const me = await linear().viewer();
+      const me = await linear(ctx.configDir).viewer();
       checks.push({ name: 'Linear', status: 'ok', detail: `connected as ${me.name}` });
     } catch (err) {
       checks.push({ name: 'Linear', status: 'fail', detail: (err as Error).message, fix: 'vsf agents key' });
@@ -1161,13 +1161,13 @@ const agents: Tool = {
         ctx.log('Keys are not accepted on the command line. Pipe the key in instead.');
         return 2;
       }
-      if (interactive()) return (await setupKey(ctx.ui)) ? 0 : 1;
+      if (interactive()) return (await setupKey(ctx.ui, ctx.configDir)) ? 0 : 1;
       const key = readFileSync(0, 'utf8').trim();
       if (!looksLikeLinearKey(key)) {
         ctx.log('Linear keys start with lin_api_');
         return 2;
       }
-      return (await verifyAndStore(key, ctx.log, ctx.log)) ? 0 : 1;
+      return (await verifyAndStore(ctx.configDir, key, ctx.log, ctx.log)) ? 0 : 1;
     },
 
     async help(args, ctx) {

@@ -24,7 +24,9 @@ test('no agent CLI is a failure, one is enough', () => {
   assert.ok(!codexOnly.some((c) => c.status === 'fail'));
 });
 
-test('non-macOS fails', () => {
-  const checks = baseChecks('win32', 'v24.0.0', fake({ git: 'git 2', gh: '', claude: '2.1' }));
-  assert.equal(checks.find((c) => c.name === 'macOS')?.status, 'fail');
+test('Linux is supported, Windows is not', () => {
+  const linux = baseChecks('linux', 'v24.0.0', fake({ git: 'git 2', gh: '', claude: '2.1', codex: '0.1' }));
+  assert.ok(linux.every((c) => c.status === 'ok'));
+  const windows = baseChecks('win32', 'v24.0.0', fake({ git: 'git 2', gh: '', claude: '2.1' }));
+  assert.equal(windows.find((c) => c.name === 'platform')?.status, 'fail');
 });

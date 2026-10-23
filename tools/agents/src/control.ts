@@ -3,9 +3,9 @@ import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, r
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 import { agentsDir, readAgentsConfig } from './config.ts';
-import { readLinearKey } from './keychain.ts';
+import { readLinearKey } from './secrets.ts';
 import { isPaused, listRuns, ours, clearCurrent, liveCurrent, readCurrent, setPaused, writeRun, type Current, type RunEntry } from './state.ts';
-import { plistPath, runnerLoaded, startRunner, stopRunner } from './launchd.ts';
+import { runnerService } from './service.ts';
 import { createLinear } from './linear.ts';
 import { parseStep, resolveName, stepNames } from './names.ts';
 import { isStatusLabel } from './workflow.ts';
@@ -18,8 +18,10 @@ const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', '
 const CARD_ID = /^[A-Za-z][A-Za-z0-9]*-\d+$/;
 const ISO_LINE = /^(\d{4}-\d\d-\d\dT[\d:.]+Z)\s*(.*)$/;
 
-function linear() {
-  const key = readLinearKey();
+export { parsePlistArgs } from './launchd.ts';
+
+function linear(configDir: string) {
+  const key = readLinearKey(configDir);
   if (!key) throw new Error('No Linear API key. Run vsf agents key');
   return createLinear(key);
 }
@@ -96,13 +98,6 @@ export function scanRunnerErrors(text: string, now: number): { count: number; la
   return { count: bad.length, last: bad.at(-1) ?? '' };
 }
 
-// The <string> values of a launchd plist's ProgramArguments.
-export function parsePlistArgs(plist: string): string[] {
-  const block = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(plist)?.[1] ?? '';
-  const unxml = (s: string) => s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
-  return [...block.matchAll(/<string>([\s\S]*?)<\/string>/g)].map((m) => unxml(m[1]!));
-}
-
 function lastTickOf(text: string): { at: string; line: string } | null {
   for (const line of text.split('\n').reverse()) {
     const m = ISO_LINE.exec(line);
@@ -176,7 +171,7 @@ const guard = (fn: ToolCommand): ToolCommand => async (args, ctx) => {
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 function runnerState(ctx: ToolContext): 'running' | 'paused' | 'stopped' {
-  if (!runnerLoaded()) return 'stopped';
+  if (!runnerService().loaded()) return 'stopped';
   return isPaused(ctx.configDir) ? 'paused' : 'running';
 }
 
@@ -237,14 +232,14 @@ async function startCmd(ctx: ToolContext): Promise<number> {
     return 1;
   }
   try {
-    await linear().viewer();
+    await linear(ctx.configDir).viewer();
   } catch (err) {
     const msg = (err as Error).message;
     ctx.log(/^No Linear API key/.test(msg) ? msg : `Linear did not accept the key: ${msg}. Run vsf agents key.`);
     return 1;
   }
   setPaused(ctx.configDir, false);
-  if (!startRunner(ctx.home, program(ctx), logPath(ctx.configDir))) {
+  if (!runnerService().start(ctx.home, program(ctx), logPath(ctx.configDir))) {
     ctx.log('Could not start the runner. Check vsf agents logs.');
     return 1;
   }
@@ -252,10 +247,10 @@ async function startCmd(ctx: ToolContext): Promise<number> {
 }
 
 async function stopCmd(ctx: ToolContext): Promise<number> {
-  stopRunner(ctx.home);
-  // launchd may have stopped the pass; finish or tidy up whatever the lock still names.
+  runnerService().stop(ctx.home);
+  // Stopping the runner may have stopped the pass; finish or tidy up whatever the lock still names.
   const c = readCurrent(ctx.configDir);
-  if (c) await cancelCurrent(ctx, c, realDeps(ctx, linear));
+  if (c) await cancelCurrent(ctx, c, realDeps(ctx, () => linear(ctx.configDir)));
   ctx.log('Runner stopped.');
   return 0;
 }
@@ -362,7 +357,7 @@ const run = guard(async (args, ctx) => {
       return 2;
     }
   }
-  const code = await tick({ configDir: ctx.configDir, config, linear: linear(), log: ctx.log, selfCommand: ctx.selfCommand }, card, { workflow, from });
+  const code = await tick({ configDir: ctx.configDir, config, linear: linear(ctx.configDir), log: ctx.log, selfCommand: ctx.selfCommand }, card, { workflow, from });
   if (!card && code === 0) {
     if (isPaused(ctx.configDir)) ctx.log('The runner is paused, so nothing was picked up. vsf agents resume, or name a card.');
     else ctx.log('Nothing to do, or the card was verified.');
@@ -384,7 +379,7 @@ const cancel = guard(async (args, ctx) => {
     ctx.log(`${c.card ?? 'Another card'} is running, not ${card}.`);
     return 1;
   }
-  await cancelCurrent(ctx, c, realDeps(ctx, linear));
+  await cancelCurrent(ctx, c, realDeps(ctx, () => linear(ctx.configDir)));
   return 0;
 });
 
@@ -399,7 +394,7 @@ const retry = guard(async (args, ctx) => {
   }
   const config = readAgentsConfig(ctx.configDir);
   const names = Object.keys(config.workflows);
-  const l = linear();
+  const l = linear(ctx.configDir);
   const card = await l.card(id!);
   const startsOn = (n: string) => config.workflows[n]!.triggers.some((t) => t.team === card.teamKey);
   let chosen: string;
@@ -475,7 +470,7 @@ const show = guard(async (args, ctx) => {
   }
   let labels: string[] | null = null;
   try {
-    labels = (await linear().card(id!)).labels;
+    labels = (await linear(ctx.configDir).card(id!)).labels;
   } catch {
     // live labels are optional
   }
@@ -630,16 +625,16 @@ const clean = guard(async (args, ctx) => {
   return 0;
 });
 
-// Internal: launchd runs this every minute.
+// Internal: the runner (launchd or systemd) runs this every minute.
 const tickCmd: ToolCommand = async (_args, ctx) => {
   const stamped = (l: string) => ctx.log(`${new Date().toISOString()} ${l}`);
   try {
     const config = readAgentsConfig(ctx.configDir);
-    if (!readLinearKey()) {
+    if (!readLinearKey(ctx.configDir)) {
       stamped('No Linear API key. Run vsf agents key.');
       return 1;
     }
-    return await tick({ configDir: ctx.configDir, config, linear: linear(), log: stamped, selfCommand: ctx.selfCommand });
+    return await tick({ configDir: ctx.configDir, config, linear: linear(ctx.configDir), log: stamped, selfCommand: ctx.selfCommand });
   } catch (err) {
     stamped(`Could not run the check: ${(err as Error).message}`);
     return 1;
@@ -676,9 +671,10 @@ export async function controlChecks(ctx: ToolContext): Promise<Check[]> {
         ? { name: 'agent runner', status: 'warn', detail: 'paused', fix: 'vsf agents resume' }
         : { name: 'agent runner', status: 'warn', detail: 'not running', fix: 'vsf agents start' },
   );
-  const plist = plistPath(ctx.home);
-  if (existsSync(plist)) {
-    const missing = parsePlistArgs(readFileSync(plist, 'utf8')).filter((a) => a.startsWith('/') && !existsSync(a));
+  const service = runnerService();
+  const installed = service.programArgs(ctx.home);
+  if (installed) {
+    const missing = installed.filter((a) => a.startsWith('/') && !existsSync(a));
     checks.push(
       missing.length
         ? { name: 'runner program', status: 'fail', detail: `runner points at a missing ${missing[0]}`, fix: 'vsf agents restart' }
@@ -695,6 +691,7 @@ export async function controlChecks(ctx: ToolContext): Promise<Check[]> {
         : { name: 'runner errors', status: 'ok', detail: 'no errors in the last hour' },
     );
   }
+  checks.push(...service.checks());
   checks.push(engineLogin(readAgentsConfig(ctx.configDir).engine));
   return checks;
 }
