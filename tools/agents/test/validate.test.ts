@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import agents from '../src/index.ts';
 import { DEFAULTS, defsDir, writeAgentsConfig } from '../src/config.ts';
 import { parseFrom } from '../src/names.ts';
+import { readSecret, storeSecret } from '../src/secrets.ts';
 import type { ToolContext } from '../src/types.ts';
 
 function ctxFor() {
@@ -65,4 +66,26 @@ test('vsf agents run --from with a bad step id says Unknown step and exits 2', a
   const { ctx, logs } = ctxFor();
   assert.equal(await agents.commands!.run!(['ENG-1', '--from', 'a b'], ctx), 2);
   assert.match(logs.join('\n'), /Unknown step a b/);
+});
+
+test('vsf agents discord refuses a URL on the command line and stores nothing', async () => {
+  const { ctx, configDir, logs } = ctxFor();
+  assert.equal(await agents.commands!.discord!(['https://discord.com/api/webhooks/1/x'], ctx), 2);
+  assert.match(logs.join('\n'), /not accepted on the command line/);
+  assert.equal(readSecret(configDir, 'discord'), null);
+});
+
+test('a workflow keeps its webhook through a rename, and rm drops it', async () => {
+  if (process.platform === 'darwin') return;
+  const { ctx, configDir, logs } = ctxFor();
+  const flow = { triggers: [{ source: 'cron', schedule: '0 5 * * *', task: 'go' }], steps: ['vs-qa'], maxRounds: 1, project: 'p' };
+  writeAgentsConfig(configDir, { ...structuredClone(DEFAULTS), projects: { p: { path: mkdtempSync(join(tmpdir(), 'vsf-repo-')) } }, workflows: { build: flow, other: flow } } as never);
+  storeSecret(configDir, 'discord-build', 'https://discord.com/api/webhooks/1/x');
+  assert.equal(await agents.commands!.workflow!(['rename', 'build', 'Other'], ctx), 1);
+  assert.match(logs.at(-1)!, /would share a webhook/);
+  assert.equal(await agents.commands!.workflow!(['rename', 'build', 'make'], ctx), 0, logs.join('\n'));
+  assert.equal(readSecret(configDir, 'discord-build'), null);
+  assert.equal(readSecret(configDir, 'discord-make'), 'https://discord.com/api/webhooks/1/x');
+  assert.equal(await agents.commands!.workflow!(['rm', 'make', '--yes'], ctx), 0, logs.join('\n'));
+  assert.equal(readSecret(configDir, 'discord-make'), null);
 });

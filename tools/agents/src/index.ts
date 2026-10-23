@@ -9,6 +9,7 @@ import { controlChecks, controlCommands, controlUsage } from './control.ts';
 import { keyStore, looksLikeLinearKey, readLinearKey, readSecret, storeLinearKey, storeSecret } from './secrets.ts';
 import { TRACKERS } from './tracker.ts';
 import { createVoidTrack } from './voidtrack.ts';
+import { addWebhook, dropWebhook, looksLikeWebhook, moveWebhook, removeWebhook, testWebhook, webhookFor } from './notify.ts';
 import { parseCron } from './cron.ts';
 import { trackersInUse } from './control.ts';
 import { runnerService } from './service.ts';
@@ -423,6 +424,7 @@ const USAGE: [string, string][] = [
   ['link DIR [--claude | --codex]', 'Link the agents into a config folder'],
   ['unlink DIR', 'Remove the agents from a config folder'],
   ['key [--voidtrack]', 'Store or replace the Linear or VoidTrack API key (reads stdin without a terminal)'],
+  ['discord [--workflow W] [--test] [--rm]', 'Store, test or remove the Discord webhook for run pings, global or for one workflow; it is stored only after a test message goes through (reads stdin without a terminal)'],
   ['profile [init]', `Your profile: rules (${RULES_FILE}) and Claude settings (${CLAUDE_SETTINGS}) every agent run carries; init creates it`],
   ['validate [DIR]', `Check an agent folder (DIR/${AGENT_FILE} and its prompts), or the config and every folder under agents/defs`],
   ['help [COMMAND]', 'Show this list, or one command'],
@@ -705,7 +707,14 @@ const workflowSubs: Record<string, ToolCommand> = {
       const teams = await teamsOrNull(ctx);
       if (!teams) return 1;
       const r = await promptWorkflow(ctx.ui, config, teams, { name, workflow: current }, true);
-      if (r.name !== name) config.workflows = renameKey(config.workflows, name, r.name);
+      if (r.name !== name) {
+        const refused = moveWebhook(ctx.configDir, name, r.name);
+        if (refused) {
+          ctx.log(refused);
+          return 1;
+        }
+        config.workflows = renameKey(config.workflows, name, r.name);
+      }
       config.workflows[r.name] = r.workflow;
       return saveWorkflow(config, r.name, r.workflow, ctx);
     }
@@ -751,6 +760,11 @@ const workflowSubs: Record<string, ToolCommand> = {
       ctx.log(`A workflow named ${next} already exists.`);
       return 1;
     }
+    const refused = moveWebhook(ctx.configDir, old, next);
+    if (refused) {
+      ctx.log(refused);
+      return 1;
+    }
     config.workflows = renameKey(config.workflows, old, next);
     save(ctx, config);
     ctx.log(`Workflow ${old} is now ${next}.`);
@@ -773,6 +787,7 @@ const workflowSubs: Record<string, ToolCommand> = {
     }
     delete config.workflows[name];
     save(ctx, config);
+    dropWebhook(ctx.configDir, name);
     ctx.log(`Deleted workflow ${name}.`);
     return 0;
   },
@@ -1235,6 +1250,10 @@ const agents: Tool = {
     if (trackersInUse(config).includes('voidtrack') && !readSecret(ctx.configDir, 'voidtrack')) {
       if (!(await setupKey(ui, ctx.configDir, 'voidtrack'))) ctx.log('VoidTrack is not connected yet. Run vsf agents key --voidtrack.');
     }
+    if (!webhookFor(ctx.configDir) && (await ui.confirm('Send run pings to Discord?', false))) {
+      const url = await ui.secret('Paste the Discord webhook URL', (v) => (looksLikeWebhook(v.trim()) ? undefined : 'Not a Discord webhook URL'));
+      if (!(await addWebhook(ctx.configDir, url.trim(), undefined, ui.info))) ctx.log('Discord is not connected. Run vsf agents discord to retry.');
+    }
 
     if (Object.keys(config.workflows).length && (await ui.confirm('Start the background runner now? Every minute it checks for cards and schedules that start your workflows.'))) {
       const ok = runnerService().start(ctx.home, [...ctx.selfCommand, 'agents', 'tick'], join(agentsDir(ctx.configDir), 'runner.log'));
@@ -1275,6 +1294,7 @@ const agents: Tool = {
         checks.push({ name, status: 'fail', detail: (err as Error).message, fix: `vsf agents key${kind === 'linear' ? '' : ` --${kind}`}` });
       }
     }
+    if (webhookFor(ctx.configDir)) checks.push({ name: 'discord', status: 'ok', detail: 'webhook set' });
     const workflows = Object.entries(saved.workflows);
     const broken = workflows.filter(([, c]) => !saved.projects[c.project] || !isRepo(saved.projects[c.project]!.path)).map(([n]) => n);
     checks.push(
@@ -1400,6 +1420,35 @@ const agents: Tool = {
         return 2;
       }
       return (await verifyAndStore(ctx.configDir, key, ctx.log, ctx.log, kind)) ? 0 : 1;
+    },
+
+    async discord(args, ctx) {
+      const p = begin('discord', args, { workflow: { type: 'string' }, test: { type: 'boolean' }, rm: { type: 'boolean' } }, ctx);
+      if (typeof p === 'number') return p;
+      if (p.positionals.length) {
+        ctx.log('Webhooks are not accepted on the command line. Pipe the URL in instead.');
+        return 2;
+      }
+      if (p.values.test && p.values.rm) {
+        ctx.log('Give --test or --rm, not both.');
+        return 2;
+      }
+      let workflow: string | undefined;
+      if (p.values.workflow) {
+        const name = pickWorkflow(readAgentsConfig(ctx.configDir), p.values.workflow, ctx);
+        if (!name) return 1;
+        workflow = name;
+      }
+      if (p.values.test) return (await testWebhook(ctx.configDir, workflow, ctx.log)) ? 0 : 1;
+      if (p.values.rm) return removeWebhook(ctx.configDir, workflow, ctx.log) ? 0 : 1;
+      const url = interactive()
+        ? await ctx.ui.secret('Paste the Discord webhook URL', (v) => (looksLikeWebhook(v.trim()) ? undefined : 'Not a Discord webhook URL'))
+        : readFileSync(0, 'utf8');
+      if (!url.trim()) {
+        ctx.log('No webhook on stdin.');
+        return 2;
+      }
+      return (await addWebhook(ctx.configDir, url.trim(), workflow, ctx.log)) ? 0 : 1;
     },
 
     async help(args, ctx) {
