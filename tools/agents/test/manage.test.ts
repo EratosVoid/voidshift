@@ -61,6 +61,9 @@ test('validateConfig checks the whole config', () => {
   assert.match(validateConfig({ ...good, models: { dev: 1 } }).join(' '), /models/);
   assert.match(validateConfig({ ...good, reviewState: ' ' }).join(' '), /reviewState/);
   assert.match(validateConfig({ ...good, timeoutMinutes: 500 }).join(' '), /timeoutMinutes/);
+  for (const maxRuns of [-1, 33, 1.5, '2']) assert.match(validateConfig({ ...good, maxRuns }).join(' '), /maxRuns/, String(maxRuns));
+  for (const pauseAt of [-1, 101, 89.5]) assert.match(validateConfig({ ...good, pauseAt }).join(' '), /pauseAt/, String(pauseAt));
+  assert.deepEqual(validateConfig({ ...good, maxRuns: 32, pauseAt: 0 }), []);
   assert.match(validateConfig({ ...good, projects: { p: { path: tmpdir() } } }).join(' '), /not a git repository/);
   assert.match(validateConfig({ ...good, workflows: { w: wf({ project: 'zz' }) } }).join(' '), /Workflow w: Project zz/);
   assert.match(validateConfig({ ...good, homes: [{ kind: 'x', dir: 'd' }] }).join(' '), /homes/);

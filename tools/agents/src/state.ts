@@ -141,6 +141,32 @@ export function setPaused(configDir: string, paused: boolean): void {
   else rmSync(pausePath(configDir), { force: true });
 }
 
+// The Claude subscription's 5 hour window as last read, so status and every
+// pass can see it without asking again.
+export interface Window {
+  checkedAt: string;
+  // Percent used, 0 to 100.
+  utilization?: number;
+  resetsAt?: string;
+  // Why the last read failed; an older reading may still be kept.
+  error?: string;
+}
+
+const windowPath = (configDir: string) => join(agentsDir(configDir), 'window.json');
+
+export function readWindow(configDir: string): Window | null {
+  try {
+    return JSON.parse(readFileSync(windowPath(configDir), 'utf8')) as Window;
+  } catch {
+    return null;
+  }
+}
+
+export function writeWindow(configDir: string, w: Window): void {
+  mkdirSync(agentsDir(configDir), { recursive: true });
+  writeFileSync(windowPath(configDir), JSON.stringify(w, null, 2) + '\n');
+}
+
 // Linear writes that failed (Linear was down when a card parked) and are
 // retried at the start of the next tick.
 export interface Pending {
@@ -174,6 +200,49 @@ export function writePending(configDir: string, pending: Pending[]): void {
 // One card's pass through a workflow, saved as run.json in its run folder.
 export type Outcome = 'running' | 'verified' | 'changes' | 'parked' | 'cancelled';
 
+// Tokens and cost of one step, or added up over a run. Codex steps carry only
+// the model. Cost is what Claude reports, an estimate.
+export interface Usage {
+  input?: number;
+  output?: number;
+  // Cache reads and writes.
+  cached?: number;
+  costUsd?: number;
+  // The model a step spent the most on.
+  model?: string;
+}
+
+// A run's usage: every step added up, and each model once.
+export type RunUsage = Omit<Usage, 'model'> & { models?: string[] };
+
+export function addUsage(total: RunUsage | undefined, step: Usage): RunUsage {
+  const sum = (a?: number, b?: number) => (a === undefined && b === undefined ? undefined : (a ?? 0) + (b ?? 0));
+  const out: RunUsage = {};
+  const input = sum(total?.input, step.input);
+  const output = sum(total?.output, step.output);
+  const cached = sum(total?.cached, step.cached);
+  const costUsd = sum(total?.costUsd, step.costUsd);
+  if (input !== undefined) out.input = input;
+  if (output !== undefined) out.output = output;
+  if (cached !== undefined) out.cached = cached;
+  if (costUsd !== undefined) out.costUsd = costUsd;
+  const models = [...new Set([...(total?.models ?? []), ...(step.model ? [step.model] : [])])];
+  if (models.length) out.models = models;
+  return out;
+}
+
+// "12.3k in, 4.1k out, 1.2M cached, $0.42 est.", or empty with nothing to show.
+export function usageText(u: Usage | RunUsage | undefined): string {
+  if (!u) return '';
+  const n = (v: number) => (v >= 1e6 ? `${(v / 1e6).toFixed(1)}M` : v >= 1e3 ? `${(v / 1e3).toFixed(1)}k` : String(v));
+  const parts: string[] = [];
+  if (u.input !== undefined) parts.push(`${n(u.input)} in`);
+  if (u.output !== undefined) parts.push(`${n(u.output)} out`);
+  if (u.cached) parts.push(`${n(u.cached)} cached`);
+  if (u.costUsd !== undefined) parts.push(`$${u.costUsd.toFixed(2)} est.`);
+  return parts.join(', ');
+}
+
 export interface StepRecord {
   // A built-in step id, or a custom step's id.
   step: string;
@@ -186,6 +255,7 @@ export interface StepRecord {
   summary?: string;
   // File name of the step's log inside the run folder.
   log?: string;
+  usage?: Usage;
 }
 
 export interface RunRecord {
@@ -204,6 +274,7 @@ export interface RunRecord {
   workspace?: string;
   startedAt: string;
   endedAt?: string;
+  usage?: RunUsage;
 }
 
 export const runsDir = (configDir: string) => join(agentsDir(configDir), 'runs');

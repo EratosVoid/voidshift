@@ -5,7 +5,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { cancelCurrent, countRounds, isInterrupted, formatRunLine, parseAge, parsePlistArgs, pickCancel, scanRunnerErrors, trackerWarnings, workingLine, workspaceLines } from '../src/control.ts';
 import type { Tracker, Trackers } from '../src/tracker.ts';
-import { lockPath, workspaceLockPath, writeCurrent, writeWorkspace, type RunEntry } from '../src/state.ts';
+import { lockPath, readWindow, workspaceLockPath, writeCurrent, writeWindow, writeWorkspace, type RunEntry } from '../src/state.ts';
+import { controlCommands } from '../src/control.ts';
+import { windowLine } from '../src/usage.ts';
 import type { ToolContext } from '../src/types.ts';
 
 test('parseAge reads days and hours', () => {
@@ -174,4 +176,26 @@ test('a missing tracker key is a warning naming the key', async () => {
     },
   }) as unknown as Tracker;
   assert.deepEqual(await trackerWarnings(['linear', 'voidtrack'], trackers), [{ kind: 'voidtrack', message: missing }]);
+});
+
+test('status prints the window line, and the held line once it reaches pauseAt', () => {
+  const configDir = mkdtempSync(join(tmpdir(), 'vsf-ctl-'));
+  const resetsAt = new Date(Date.now() + 3_600_000).toISOString();
+  writeWindow(configDir, { checkedAt: new Date().toISOString(), utilization: 62, resetsAt });
+  assert.match(windowLine(readWindow(configDir), 90), /^Window: 5 hour at 62%, resets \d\d:\d\d\.$/);
+  writeWindow(configDir, { checkedAt: new Date().toISOString(), utilization: 91, resetsAt });
+  assert.match(windowLine(readWindow(configDir), 90), /^Window: held at 91% until \d\d:\d\d, running cards finish\.$/);
+});
+
+test('show lists tokens and cost per step and a total', async () => {
+  const configDir = mkdtempSync(join(tmpdir(), 'vsf-ctl-'));
+  const runDir = join(configDir, 'agents', 'runs', 'ENG-12', '2026-10-20T10-00-00-000Z');
+  mkdirSync(runDir, { recursive: true });
+  const steps = [{ step: 'vs-dev', label: 'Dev', startedAt: '2026-10-20T10:00:00.000Z', endedAt: '2026-10-20T10:05:00.000Z', result: 'done', usage: { input: 1200, output: 300, costUsd: 0.5, model: 'opus' } }];
+  writeFileSync(join(runDir, 'run.json'), JSON.stringify(record({ steps, usage: { input: 1200, output: 300, costUsd: 0.5, models: ['opus'] } })));
+  const logs: string[] = [];
+  const ctx = { configDir, log: (l: string) => logs.push(l) } as unknown as ToolContext;
+  assert.equal(await controlCommands.show!(['ENG-12'], ctx), 0);
+  assert.ok(logs.some((l) => /^  Dev .* 1\.2k in, 300 out, \$0\.50 est\./.test(l)), logs.join('\n'));
+  assert.ok(logs.includes('Usage: 1.2k in, 300 out, $0.50 est., opus'), logs.join('\n'));
 });

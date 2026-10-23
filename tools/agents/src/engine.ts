@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { createWriteStream, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { usageText, type Usage } from './state.ts';
 
 export type Engine = 'claude' | 'codex';
 
@@ -32,7 +33,7 @@ export function engineArgs(o: RunOptions, outFile: string): { cmd: string; args:
   // breaks the run, so on Linux every step runs with permissions skipped.
   const skip = (o.platform ?? process.platform) === 'linux';
   if (o.engine === 'claude' && skip) {
-    const args = ['-p', '--output-format', 'text', '--dangerously-skip-permissions'];
+    const args = ['-p', '--output-format', 'json', '--dangerously-skip-permissions'];
     if (o.vault) args.push('--add-dir', o.vault);
     if (o.model) args.push('--model', o.model);
     if (o.settingsFile) args.push('--settings', o.settingsFile);
@@ -41,7 +42,7 @@ export function engineArgs(o: RunOptions, outFile: string): { cmd: string; args:
   if (o.engine === 'claude') {
     // Edit rules cover every file-writing tool; a Write(path) rule is ignored.
     const vaultTools = o.vault ? [`Edit(/${o.vault}/**)`] : [];
-    const args = ['-p', '--output-format', 'text', '--allowedTools', [...(o.write ? CLAUDE_WRITE : CLAUDE_READ), ...vaultTools].join(',')];
+    const args = ['-p', '--output-format', 'json', '--allowedTools', [...(o.write ? CLAUDE_WRITE : CLAUDE_READ), ...vaultTools].join(',')];
     if (o.vault) args.push('--add-dir', o.vault);
     if (o.write) args.push('--permission-mode', 'acceptEdits');
     if (o.model) args.push('--model', o.model);
@@ -92,10 +93,44 @@ export function errorTail(stderr: string): string {
   return out || lines[0]?.slice(-300) || '';
 }
 
+export interface ClaudeResult {
+  text: string;
+  isError: boolean;
+  usage: Usage;
+}
+
+// Claude's JSON answer: its final text, and the tokens and cost it spent.
+// Null when the output is not that JSON, so it is taken as plain text.
+export function parseClaudeJson(stdout: string): ClaudeResult | null {
+  let j: any;
+  try {
+    j = JSON.parse(stdout);
+  } catch {
+    return null;
+  }
+  if (!j || typeof j !== 'object' || typeof j.result !== 'string') return null;
+  const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+  const usage: Usage = {};
+  const models = j.modelUsage && typeof j.modelUsage === 'object' ? Object.entries(j.modelUsage as Record<string, any>) : [];
+  if (models.length) {
+    // Every model the step used, side models included.
+    usage.input = models.reduce((t, [, m]) => t + num(m?.inputTokens), 0);
+    usage.output = models.reduce((t, [, m]) => t + num(m?.outputTokens), 0);
+    usage.cached = models.reduce((t, [, m]) => t + num(m?.cacheReadInputTokens) + num(m?.cacheCreationInputTokens), 0);
+    usage.model = models.reduce((best, cur) => (num(cur[1]?.costUSD) > num(best[1]?.costUSD) ? cur : best))[0];
+  } else if (j.usage && typeof j.usage === 'object') {
+    usage.input = num(j.usage.input_tokens);
+    usage.output = num(j.usage.output_tokens);
+    usage.cached = num(j.usage.cache_read_input_tokens) + num(j.usage.cache_creation_input_tokens);
+  }
+  if (typeof j.total_cost_usd === 'number') usage.costUsd = j.total_cost_usd;
+  return { text: j.result, isError: j.is_error === true, usage };
+}
+
 // Runs one agent step with the prompt on stdin. Resolves with the agent's
-// final text; everything it prints also goes to the log file. A process that
-// fails also says why in `error`.
-export function runAgent(o: RunOptions): Promise<{ ok: boolean; output: string; error?: string }> {
+// final text; what it prints also goes to the log file, Claude's answer as
+// its text and a usage line. A process that fails also says why in `error`.
+export function runAgent(o: RunOptions): Promise<{ ok: boolean; output: string; error?: string; usage?: Usage }> {
   const dir = mkdtempSync(join(tmpdir(), 'voidshift-run-'));
   const outFile = join(dir, 'last.txt');
   const { cmd, args } = engineArgs(o, outFile);
@@ -108,10 +143,11 @@ export function runAgent(o: RunOptions): Promise<{ ok: boolean; output: string; 
     const env = { ...process.env, VOIDSHIFT_RECALL: 'off' };
     const child = spawn(cmd, args, { cwd: o.cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
     track(child);
+    // Claude's JSON comes at exit, so it is held and logged as text then.
     let stdout = '';
     child.stdout.on('data', (d) => {
       stdout += d;
-      log.write(d);
+      if (o.engine !== 'claude') log.write(d);
     });
     // Only the tail is kept; the log has all of it.
     let stderr = '';
@@ -134,8 +170,18 @@ export function runAgent(o: RunOptions): Promise<{ ok: boolean; output: string; 
     child.on('close', (code) => {
       clearTimeout(timer);
       children.delete(child);
-      log.end(`\nexit ${code}\n`);
       let output = stdout;
+      let usage: Usage | undefined;
+      let failure = '';
+      if (o.engine === 'claude') {
+        const parsed = parseClaudeJson(stdout);
+        if (parsed) {
+          output = parsed.text;
+          if (Object.keys(parsed.usage).length) usage = parsed.usage;
+          if (parsed.isError) failure = parsed.text;
+          log.write(`${output}\n\nusage: ${[usageText(usage), usage?.model].filter(Boolean).join(', ') || 'none reported'}\n`);
+        } else log.write(stdout);
+      } else if (o.model) usage = { model: o.model };
       if (o.engine === 'codex') {
         try {
           output = readFileSync(outFile, 'utf8');
@@ -144,10 +190,10 @@ export function runAgent(o: RunOptions): Promise<{ ok: boolean; output: string; 
         }
       }
       rmSync(dir, { recursive: true, force: true });
-      if (code === 0) return resolve({ ok: true, output });
       const minutes = Math.round(timeoutMs / 60_000);
-      const error = timedOut ? `timed out after ${minutes} minute${minutes === 1 ? '' : 's'}` : errorTail(stderr) || `exit ${code}`;
-      resolve({ ok: false, output, error });
+      const error = code === 0 ? undefined : timedOut ? `timed out after ${minutes} minute${minutes === 1 ? '' : 's'}` : errorTail(stderr) || errorTail(failure) || `exit ${code}`;
+      // Settled once the log is written, so the step's log is whole when read.
+      log.end(`\nexit ${code}\n`, () => resolve({ ok: code === 0, output, ...(error ? { error } : {}), ...(usage ? { usage } : {}) }));
     });
     child.stdin.end(o.prompt);
   });

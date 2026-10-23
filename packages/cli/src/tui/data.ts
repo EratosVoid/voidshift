@@ -46,6 +46,30 @@ export interface AgentsStatus {
   interrupted: string[];
   workflows: number;
   projects: number;
+  // The Claude 5 hour window as last read; older agents print none.
+  window?: AgentsWindow | null;
+  // Most runs at once; 0 or unset means no cap.
+  maxRuns?: number;
+}
+
+export interface AgentsWindow {
+  checkedAt: string;
+  // Percent used, 0 to 100.
+  utilization?: number;
+  resetsAt?: string;
+  error?: string;
+  // Set while no new run starts: when the window resets.
+  heldUntil?: string | null;
+}
+
+// Tokens and cost of a step, or of a whole run.
+export interface Usage {
+  input?: number;
+  output?: number;
+  cached?: number;
+  costUsd?: number;
+  model?: string;
+  models?: string[];
 }
 
 // The runs going on now, whichever shape the agents tool printed.
@@ -60,6 +84,7 @@ export interface StepRecord {
   result?: string;
   summary?: string;
   log?: string;
+  usage?: Usage;
 }
 
 export interface RunRecord {
@@ -74,6 +99,7 @@ export interface RunRecord {
   prUrl?: string;
   startedAt: string;
   endedAt?: string;
+  usage?: Usage;
 }
 
 export interface RunItem {

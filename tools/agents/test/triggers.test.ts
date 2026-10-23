@@ -464,3 +464,24 @@ test('a verified run with a PR pings ready once, and a throwing ping leaves it v
   assert.equal(await run(), 'verified', logs.join('\n'));
   assert.ok(logs.some((l) => /discord: webhook down/.test(l)), logs.join('\n'));
 });
+
+test('a claude step that answers in JSON saves its usage on the step and the run', async () => {
+  const json = JSON.stringify({ type: 'result', is_error: false, result: 'brief written', total_cost_usd: 0.25, modelUsage: { 'claude-haiku': { inputTokens: 900, outputTokens: 100, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0.25 } } });
+  const rig = agentRig(`echo '${json}'\n`);
+  const workflow: Workflow = { triggers: [cron], steps: [{ id: 'brief', prompt: 'brief.md', output: 'none' }, { id: 'again', prompt: 'brief.md', output: 'none' }], maxRounds: 1, project: 'p' };
+  const { rc, logs } = rcWith({ w: workflow }, {});
+  rc.selfCommand = [];
+  rc.platform = 'darwin';
+  rc.config.projects.p = { path: rig.repo, base: 'main' };
+  rc.config.folders = { w: rig.defs };
+  const card = cronCard('w', 'Brief me', new Date());
+  assert.equal(await withPath(rig.bin, () => runCard(card, cron, 'w', workflow, rc.config.projects.p!, rc)), 'verified', logs.join('\n'));
+  const { listRuns } = await import('../src/state.ts');
+  const run = listRuns(rc.configDir, card.identifier)[0]!.record!;
+  assert.deepEqual(run.steps.map((s) => s.usage), [
+    { input: 900, output: 100, cached: 0, model: 'claude-haiku', costUsd: 0.25 },
+    { input: 900, output: 100, cached: 0, model: 'claude-haiku', costUsd: 0.25 },
+  ]);
+  assert.deepEqual(run.usage, { input: 1800, output: 200, cached: 0, costUsd: 0.5, models: ['claude-haiku'] });
+  assert.equal(run.steps[0]!.summary, 'brief written');
+});

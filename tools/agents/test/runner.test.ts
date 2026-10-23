@@ -11,7 +11,7 @@ import type { Card } from '../src/linear.ts';
 import type { Tracker } from '../src/tracker.ts';
 type Linear = Tracker;
 import { agentsDir } from '../src/config.ts';
-import { lockPath, readCronState, readPending, setPaused, workspaceLockPath, writeCronState, writePending } from '../src/state.ts';
+import { lockPath, readCronState, readPending, setPaused, workspaceLockPath, writeCronState, writePending, writeWindow } from '../src/state.ts';
 
 const card = (labels: string[], teamKey = 'ENG', identifier = 'ENG-1', projectName?: string): Card => ({ id: '1', identifier, title: 'T', url: 'u', branchName: 'b', teamId: 't', teamKey, labels, projectName });
 
@@ -57,7 +57,7 @@ function fakeStarts(events: string[], hold = false) {
     else (child as unknown as { exit: () => void }).exit = exit;
     return child;
   };
-  return { start, children, waitMs: 60_000 };
+  return { start, children, waitMs: 60_000, window: async () => {} };
 }
 
 // Two workspaces, wa and wb, with a project in each that claims a tracker project.
@@ -331,4 +331,69 @@ test('the dispatcher asks for the summary on every pass, paused or not', async (
   setPaused(rc.configDir, false);
   assert.equal(await dispatch(rc, fakeStarts([])), 0);
   assert.deepEqual(seen, [true]);
+});
+
+test('maxRuns 1 starts one child when two workspaces both have work', async () => {
+  const events: string[] = [];
+  const { rc, configDir } = setup({ myCardsWithLabel: async () => [card(['a'], 'ENG', 'ENG-1', 'Alpha'), card(['a'], 'ENG', 'ENG-2', 'Beta')] }, { one: wf('a') });
+  twoWorkspaces(rc, configDir);
+  rc.config.maxRuns = 1;
+  assert.equal(await dispatch(rc, fakeStarts(events)), 0);
+  assert.deepEqual(events, ['start ENG-1', 'exit ENG-1', 'start ENG-2', 'exit ENG-2'], 'one at a time');
+});
+
+test('maxRuns 1 with a live card run in one workspace starts nothing in the other', async () => {
+  const child = fakeRunner();
+  try {
+    const events: string[] = [];
+    const { rc, configDir } = setup({ myCardsWithLabel: async () => [card(['a'], 'ENG', 'ENG-2', 'Beta')] }, { one: wf('a') });
+    twoWorkspaces(rc, configDir);
+    rc.config.maxRuns = 1;
+    holdWorkspace(configDir, 'wa', child.pid!);
+    assert.equal(await dispatch(rc, fakeStarts(events)), 0);
+    assert.deepEqual(events, []);
+  } finally {
+    child.kill();
+  }
+});
+
+test('a lock with no card takes no slot under the cap', async () => {
+  const child = fakeRunner();
+  try {
+    const events: string[] = [];
+    const { rc, configDir } = setup({ myCardsWithLabel: async () => [card(['a'], 'ENG', 'ENG-2', 'Beta')] }, { one: wf('a') });
+    twoWorkspaces(rc, configDir);
+    rc.config.maxRuns = 1;
+    mkdirSync(join(agentsDir(configDir), 'locks'), { recursive: true });
+    writeFileSync(workspaceLockPath(configDir, 'wa'), JSON.stringify({ pid: child.pid, workspace: 'wa', startedAt: new Date().toISOString() }));
+    assert.equal(await dispatch(rc, fakeStarts(events)), 0);
+    assert.deepEqual(events, ['start ENG-2', 'exit ENG-2']);
+  } finally {
+    child.kill();
+  }
+});
+
+test('a held window starts nothing and says so once', async () => {
+  const events: string[] = [];
+  const { rc, configDir, logs } = setup({ myCardsWithLabel: async () => [card(['a'])] }, { one: wf('a') });
+  rc.config.projects.p = { path: '/p' };
+  const resetsAt = new Date(Date.now() + 3_600_000).toISOString();
+  writeWindow(configDir, { checkedAt: new Date().toISOString(), utilization: 91, resetsAt });
+  let reads = 0;
+  assert.equal(await dispatch(rc, { ...fakeStarts(events), window: async () => void reads++ }), 0);
+  assert.deepEqual(events, []);
+  assert.equal(reads, 0, 'a fresh reading is not read again');
+  assert.equal(logs.filter((l) => /5 hour window is at 91%/.test(l)).length, 1);
+  assert.equal(await tick(rc), 0);
+  assert.match(logs.at(-1)!, /no new run starts until/);
+  writeWindow(configDir, { checkedAt: new Date().toISOString(), utilization: 89, resetsAt });
+  assert.equal(await dispatch(rc, fakeStarts(events)), 0);
+  assert.deepEqual(events, ['start ENG-1', 'exit ENG-1']);
+});
+
+test('a stale window is read before the first pass', async () => {
+  const { rc } = setup({ myCardsWithLabel: async () => [] }, { one: wf('a') });
+  let reads = 0;
+  assert.equal(await dispatch(rc, { ...fakeStarts([]), window: async () => void reads++ }), 0);
+  assert.equal(reads, 1);
 });

@@ -8,7 +8,7 @@ import { configDir } from '../../config.ts';
 import { runAction } from '../actions.ts';
 import { useBackGuard, useEquivalent, useHints, useKeys, useScreen, type ActionSpec, type Hint } from '../context.ts';
 import { liveRunsOf, useData, type AgentsCurrent, type DataState, type RunItem, type StepRecord } from '../data.ts';
-import { duration, folderStamp, stamp, tilde, truncate } from '../format.ts';
+import { duration, folderStamp, stamp, tilde, truncate, usageText } from '../format.ts';
 import { Lines, Panel, Select, Table, TextInput, outcomeColour, seg, type Cell, type Line } from '../widgets.ts';
 import type { Screen } from '../screens.ts';
 import { theme } from '../theme.ts';
@@ -107,14 +107,16 @@ export const stepDuration = (step: StepRecord, nowMs: number): string => {
   return ms === null ? '' : duration(ms);
 };
 
-// One line per step: mark, name, result, time, summary.
+// One line per step: mark, name, result, time, tokens and cost, summary.
 export function stepLine(step: StepRecord, nowMs: number): Line {
   const m = stepMark(step);
+  const used = usageText(step.usage);
   return [
     seg(`${m.glyph} `, m.colour),
     seg(step.label.padEnd(8)),
     seg(stepResult(step).padEnd(7), step.endedAt ? undefined : theme.dim),
     seg(stepDuration(step, nowMs).padStart(4) + '  ', theme.dim),
+    ...(used ? [seg(`${used}  `, theme.dim)] : []),
     seg(truncate(step.summary ?? '', 300), theme.dim),
   ];
 }

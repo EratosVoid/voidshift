@@ -20,6 +20,8 @@ const HINTS: Record<string, string> = {
   'agents.engine': 'claude or codex',
   'agents.timeoutMinutes': 'minutes before a step is stopped',
   'agents.reviewState': 'Linear state for verified cards',
+  'agents.maxRuns': 'most runs at once, 0 for no cap',
+  'agents.pauseAt': '5 hour window percent that holds new runs, 0 never',
   'awake.battery': 'battery floor, 5 to 95',
   'awake.heat': 'stop when the Mac runs hot',
   'awake.revertOnReboot': 'turn off again after a reboot',
