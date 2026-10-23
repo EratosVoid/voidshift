@@ -31,11 +31,35 @@ export const visibleAgents = () => Object.keys(AGENTS);
 
 export const stepEnabled = (step: StepId, enabled: string[]) => enabled.includes(step);
 
-// What starts a workflow: my cards in this Linear team carrying this label.
-export interface Trigger {
-  source: 'linear';
+// What starts a workflow: my cards in a Linear or VoidTrack team carrying a
+// label, or a schedule that runs the workflow on a standing task, no card.
+export type Tracker = 'linear' | 'voidtrack';
+export interface CardTrigger {
+  source: Tracker;
   team: string;
   label: string;
+}
+export interface CronTrigger {
+  source: 'cron';
+  // Five fields, minute hour day month weekday, in the machine's time zone.
+  schedule: string;
+  // What the run works on, in place of a card.
+  task: string;
+}
+export type Trigger = CardTrigger | CronTrigger;
+
+export const isCardTrigger = (t: Trigger): t is CardTrigger => t.source !== 'cron';
+
+// The form `--trigger` takes: "ENG:vs-plan" (Linear), "voidtrack:ORG:vs-start",
+// or "cron:0 5 * * 1:Update the dependencies".
+export function triggerSpec(t: Trigger): string {
+  if (t.source === 'cron') return `cron:${t.schedule}:${t.task}`;
+  return t.source === 'voidtrack' ? `voidtrack:${t.team}:${t.label}` : `${t.team}:${t.label}`;
+}
+
+export function describeTrigger(t: Trigger): string {
+  if (t.source === 'cron') return `cron ${t.schedule}`;
+  return `${t.source === 'voidtrack' ? 'VoidTrack ' : ''}${t.team} + ${t.label}`;
 }
 
 export interface Project {
@@ -93,7 +117,7 @@ const configPath = (configDir: string) => join(agentsDir(configDir), 'config.jso
 export const hasWork = (workflow: Pick<Workflow, 'steps'>) => workflow.steps.some((s) => STEPS[s].output === 'commits');
 export const hasProducer = (workflow: Pick<Workflow, 'steps'>) => workflow.steps.some(isProducer);
 export const describeSteps = (steps: StepId[]) => steps.map((s) => STEPS[s].label).join(' → ');
-export const describeTriggers = (triggers: Trigger[]) => triggers.map((t) => `${t.team} + ${t.label}`).join(', ');
+export const describeTriggers = (triggers: Trigger[]) => triggers.map(describeTrigger).join(', ');
 export const describeWorkflow = (c: Workflow) => `when ${describeTriggers(c.triggers)}: ${describeSteps(c.steps)} in ${c.project}`;
 
 // Step ids that were folded into QA.

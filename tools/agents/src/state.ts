@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { agentsDir, type StepId } from './config.ts';
+import { agentsDir, type StepId, type Trigger } from './config.ts';
 
 // What the runner is doing right now, kept in runner.lock so status, cancel
 // and stop can see it. Older runners wrote only the pid.
@@ -16,6 +16,8 @@ export interface Current {
   round?: number;
   startedAt?: string;
   runDir?: string;
+  // Where the card lives; Linear when unset. Cancel writes back there.
+  source?: Trigger['source'];
 }
 
 export const lockPath = (configDir: string) => join(agentsDir(configDir), 'runner.lock');
@@ -88,6 +90,8 @@ export interface Pending {
   add: string[];
   // Also drop every VoidShift status label the card carries then.
   dropStatus?: boolean;
+  // The card's tracker; Linear when unset.
+  source?: 'linear' | 'voidtrack';
 }
 
 const pendingPath = (configDir: string) => join(agentsDir(configDir), 'pending.json');
@@ -127,7 +131,9 @@ export interface RunRecord {
   title: string;
   url?: string;
   workflow: string;
+  // The trigger label, or the schedule for a scheduled run.
   trigger: string;
+  source?: Trigger['source'];
   steps: StepRecord[];
   outcome: Outcome;
   reason?: string;
@@ -175,4 +181,21 @@ export function listRuns(configDir: string, card?: string): RunEntry[] {
     }
   }
   return out.sort((a, b) => (a.stamp < b.stamp ? 1 : -1));
+}
+
+// When each schedule last fired, by workflow and schedule, so a restart or a
+// busy runner never fires one twice.
+const cronPath = (configDir: string) => join(agentsDir(configDir), 'cron.json');
+
+export function readCronState(configDir: string): Record<string, string> {
+  try {
+    return JSON.parse(readFileSync(cronPath(configDir), 'utf8')) as Record<string, string>;
+  } catch {
+    return {};
+  }
+}
+
+export function writeCronState(configDir: string, state: Record<string, string>): void {
+  mkdirSync(agentsDir(configDir), { recursive: true });
+  writeFileSync(cronPath(configDir), JSON.stringify(state, null, 2) + '\n');
 }

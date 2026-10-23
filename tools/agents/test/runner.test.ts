@@ -6,7 +6,9 @@ import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { cancelCard, nextJob, runCard, summarize, tick, type RunContext } from '../src/runner.ts';
 import { DEFAULTS } from '../src/config.ts';
-import type { Card, Linear } from '../src/linear.ts';
+import type { Card } from '../src/linear.ts';
+import type { Tracker } from '../src/tracker.ts';
+type Linear = Tracker;
 import { agentsDir } from '../src/config.ts';
 import { lockPath, readPending, setPaused, writePending } from '../src/state.ts';
 
@@ -16,13 +18,15 @@ function setup(linear: Partial<Linear>, workflows: RunContext['config']['workflo
   const configDir = mkdtempSync(join(tmpdir(), 'vsf-runner-'));
   mkdirSync(agentsDir(configDir), { recursive: true });
   const logs: string[] = [];
-  const rc: RunContext = {
+  // The fake tracker stays reachable as rc.linear so tests can swap methods.
+  const rc = {
     configDir,
     config: { ...structuredClone(DEFAULTS), workflows },
     linear: linear as Linear,
-    log: (l) => logs.push(l),
+    trackers: () => rc.linear,
+    log: (l: string) => void logs.push(l),
     selfCommand: ['vsf'],
-  };
+  } as RunContext & { linear: Linear };
   return { rc, configDir, logs };
 }
 
@@ -187,7 +191,7 @@ test('cancelCard queues a pending entry when Linear fails', async () => {
   const { configDir } = setup({});
   const linear = { card: async () => { throw new Error('down'); } } as unknown as Linear;
   assert.equal(await cancelCard(linear, configDir, 'ENG-1', 'go'), false);
-  assert.deepEqual(readPending(configDir), [{ card: 'ENG-1', comment: '**Cancelled.** Add `go` again to restart.', drop: [], add: [], dropStatus: true }]);
+  assert.deepEqual(readPending(configDir), [{ card: 'ENG-1', comment: '**Cancelled.** Add `go` again to restart.', drop: [], add: [], dropStatus: true, source: 'linear' }]);
 });
 
 test('an unexpected error is logged as one line and returns 1', async () => {

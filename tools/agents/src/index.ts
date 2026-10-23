@@ -4,12 +4,16 @@ import { homedir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { AGENTS, STEPS, TEMPLATES, isProducer, agentsDir, describeSteps, describeTriggers, describeWorkflow, stepEnabled, visibleAgents, readAgentsConfig, writeAgentsConfig, DEFAULTS, type AgentsConfig, type Project, type StepId, type Trigger, type Workflow } from './config.ts';
+import { AGENTS, STEPS, TEMPLATES, isProducer, agentsDir, describeSteps, describeTrigger, describeTriggers, describeWorkflow, stepEnabled, visibleAgents, readAgentsConfig, writeAgentsConfig, DEFAULTS, type AgentsConfig, type Project, type StepId, type Trigger, type Workflow } from './config.ts';
 import { controlChecks, controlCommands, controlUsage } from './control.ts';
-import { keyStore, looksLikeLinearKey, readLinearKey, storeLinearKey } from './secrets.ts';
+import { keyStore, looksLikeLinearKey, readLinearKey, readSecret, storeLinearKey, storeSecret } from './secrets.ts';
+import { TRACKERS } from './tracker.ts';
+import { createVoidTrack } from './voidtrack.ts';
+import { parseCron } from './cron.ts';
+import { trackersInUse } from './control.ts';
 import { runnerService } from './service.ts';
 import { createLinear } from './linear.ts';
-import { duplicateTriggerWarnings, moveKey, parseTrigger, renameKey, sameTrigger, validateConfig, validateWorkflow, workflowsUsing, type Place } from './manage.ts';
+import { TRIGGER_FORMS, duplicateTriggerWarnings, moveKey, parseTrigger, renameKey, sameTrigger, validateConfig, validateWorkflow, workflowsUsing, type Place } from './manage.ts';
 import { parseStep, resolveName, stepNames } from './names.ts';
 import { findRepos } from './repos.ts';
 import { defaultBranch, sh } from './git.ts';
@@ -97,26 +101,30 @@ async function chooseHomes(ui: Ui, configDir: string, saved: Home[]): Promise<Ho
 }
 
 // Checks the key against Linear, and only then stores it.
-async function verifyAndStore(configDir: string, key: string, info: (l: string) => void, warn: (l: string) => void): Promise<string | null> {
+async function verifyAndStore(configDir: string, key: string, info: (l: string) => void, warn: (l: string) => void, kind: 'linear' | 'voidtrack' = 'linear'): Promise<string | null> {
+  const name = TRACKERS[kind].name;
   try {
-    const me = await createLinear(key).viewer();
-    if (!storeLinearKey(configDir, key)) {
-      warn(`Linear accepted the key but it could not be stored in ${keyStore()}.`);
+    const me = await (kind === 'voidtrack' ? createVoidTrack(key) : createLinear(key)).viewer();
+    if (!(kind === 'voidtrack' ? storeSecret(configDir, 'voidtrack', key) : storeLinearKey(configDir, key))) {
+      warn(`${name} accepted the key but it could not be stored in ${keyStore()}.`);
       return null;
     }
-    info(`Linear connected as ${me.name}. Key stored in ${keyStore()}.`);
+    info(`${name} connected as ${me.name}. Key stored in ${keyStore()}.`);
     return me.name;
   } catch (err) {
-    warn(`Linear did not accept that key: ${(err as Error).message}. Nothing was stored.`);
+    warn(`${name} did not accept that key: ${(err as Error).message}. Nothing was stored.`);
     return null;
   }
 }
 
 // Asks for the key, checks it against Linear, and only then stores it.
-async function setupKey(ui: Ui, configDir: string): Promise<string | null> {
-  ui.info('Agents need a Linear personal API key (Linear > Settings > Security & access > API keys).');
-  const key = await ui.secret('Paste your Linear API key', (v) => (looksLikeLinearKey(v.trim()) ? undefined : 'Linear keys start with lin_api_'));
-  return verifyAndStore(configDir, key.trim(), ui.info, ui.warn);
+async function setupKey(ui: Ui, configDir: string, kind: 'linear' | 'voidtrack' = 'linear'): Promise<string | null> {
+  const { name, keyHint } = TRACKERS[kind];
+  ui.info(`Agents need a ${name} API key (${keyHint}).`);
+  const key = await ui.secret(`Paste your ${name} API key`, (v) =>
+    kind === 'linear' ? (looksLikeLinearKey(v.trim()) ? undefined : 'Linear keys start with lin_api_') : v.trim() ? undefined : 'Required',
+  );
+  return verifyAndStore(configDir, key.trim(), ui.info, ui.warn, kind);
 }
 
 async function currentLinearUser(configDir: string): Promise<string | null> {
@@ -302,15 +310,31 @@ async function promptWorkflow(
   if (!triggers) {
     triggers = [];
     do {
-      const team = teams.length
-        ? await ui.select(
-            triggers.length ? 'Also start for cards in which Linear team?' : 'Starts when a card in which Linear team...',
-            teams.map((t) => ({ value: t.key, label: `${t.key}  ${t.name}`, hint: t.mine ? 'your team' : undefined })),
-            myTeams.length === 1 ? myTeams[0]!.key : undefined,
-          )
-        : (await ui.text('Starts when a card in which Linear team key...', { validate: (v) => (v.trim() ? undefined : 'Required') })).trim().toUpperCase();
+      const source = await ui.select<'linear' | 'voidtrack' | 'cron'>(
+        triggers.length ? 'Also start it when...' : 'Starts when...',
+        [
+          { value: 'linear', label: 'A Linear card gets a label' },
+          { value: 'voidtrack', label: 'A VoidTrack card gets a label' },
+          { value: 'cron', label: 'On a schedule', hint: 'runs on a standing task, no card' },
+        ],
+        'linear',
+      );
+      if (source === 'cron') {
+        const schedule = (await ui.text('Cron schedule (minute hour day month weekday)', { initial: '0 5 * * 1', validate: (v) => (parseCron(v) ? undefined : 'Five fields, like 0 5 * * 1') })).trim();
+        const task = (await ui.text('What should each run work on?', { placeholder: 'Update the dependencies and fix what breaks', validate: (v) => (v.trim() ? undefined : 'Required') })).trim();
+        triggers.push({ source: 'cron', schedule, task });
+        continue;
+      }
+      const team =
+        source === 'linear' && teams.length
+          ? await ui.select(
+              'A card in which Linear team...',
+              teams.map((t) => ({ value: t.key, label: `${t.key}  ${t.name}`, hint: t.mine ? 'your team' : undefined })),
+              myTeams.length === 1 ? myTeams[0]!.key : undefined,
+            )
+          : (await ui.text(`A card in which ${TRACKERS[source].name} team key...`, { validate: (v) => (v.trim() ? undefined : 'Required') })).trim().toUpperCase();
       const label = (await ui.text('...gets which label?', { initial: 'vs-plan', validate: (v) => (v.trim() ? undefined : 'Required') })).trim();
-      triggers.push({ source: 'linear', team, label });
+      triggers.push({ source, team, label });
     } while (await ui.confirm('Add another way to start this workflow?', false));
   }
 
@@ -378,7 +402,7 @@ async function setupWorkflows(ui: Ui, config: AgentsConfig, teams: Team[], log: 
 // One entry per command, in the order help lists them.
 const USAGE: [string, string][] = [
   ['workflows [--json]', 'List workflows in the order they match'],
-  ['workflow add [NAME] [--trigger TEAM:LABEL]... [--steps dev,qa | --template build] [--project P] [--rounds N]', 'Create a workflow; prompts for what is missing'],
+  ['workflow add [NAME] [--trigger TEAM:LABEL]... [--steps dev,qa | --template build] [--project P] [--rounds N]', 'Create a workflow; prompts for what is missing. A trigger is TEAM:LABEL (Linear), voidtrack:TEAM:LABEL or "cron:SCHEDULE:TASK"'],
   ['workflow show NAME [--json]', 'Show one workflow'],
   ['workflow edit NAME [--trigger T:L]... [--add-trigger T:L] [--remove-trigger T:L] [--steps S | --template T] [--project P] [--rounds N]', 'Change a workflow; no flags asks'],
   ['workflow rename OLD NEW', 'Rename a workflow, keeping its place'],
@@ -393,7 +417,7 @@ const USAGE: [string, string][] = [
   ['homes [--json]', 'Show where the agents are linked'],
   ['link DIR [--claude | --codex]', 'Link the agents into a config folder'],
   ['unlink DIR', 'Remove the agents from a config folder'],
-  ['key', 'Store or replace the Linear API key (reads stdin without a terminal)'],
+  ['key [--voidtrack]', 'Store or replace the Linear or VoidTrack API key (reads stdin without a terminal)'],
   ['help [COMMAND]', 'Show this list, or one command'],
 ];
 
@@ -493,7 +517,7 @@ function readWorkflowFlags(v: Record<string, any>, config: AgentsConfig): Workfl
     flags.triggers = [];
     for (const t of v.trigger as string[]) {
       const parsed = parseTrigger(t);
-      if (!parsed) return { error: `Bad trigger ${t}. Use TEAM:LABEL, like ENG:vs-plan.`, code: 2 };
+      if (!parsed) return { error: `Bad trigger ${t}. Use ${TRIGGER_FORMS}.`, code: 2 };
       flags.triggers.push(parsed);
     }
   }
@@ -630,7 +654,7 @@ const workflowSubs: Record<string, ToolCommand> = {
     if (p.values.json) out(ctx, { name, ...w });
     else {
       ctx.log(`Workflow ${name}: ${describeWorkflow(w)}`);
-      for (const t of w.triggers) ctx.log(`Trigger: ${t.team} + ${t.label}`);
+      for (const t of w.triggers) ctx.log(`Trigger: ${describeTrigger(t)}${t.source === 'cron' ? `, task: ${t.task}` : ''}`);
       ctx.log(`Steps: ${describeSteps(w.steps)}`);
       ctx.log(`Project: ${w.project}`);
       ctx.log(`Rounds: ${w.maxRounds}`);
@@ -673,7 +697,7 @@ const workflowSubs: Record<string, ToolCommand> = {
     for (const t of (v['add-trigger'] ?? []) as string[]) {
       const parsed = parseTrigger(t);
       if (!parsed) {
-        ctx.log(`Bad trigger ${t}. Use TEAM:LABEL, like ENG:vs-plan.`);
+        ctx.log(`Bad trigger ${t}. Use ${TRIGGER_FORMS}.`);
         return 2;
       }
       if (!next.triggers.some((x) => sameTrigger(x, parsed))) next.triggers.push(parsed);
@@ -1070,8 +1094,11 @@ const agents: Tool = {
     await setupProjects(ui, config, ctx.log);
     await setupWorkflows(ui, config, await linear(ctx.configDir).teams(), ctx.log);
     writeAgentsConfig(ctx.configDir, config);
+    if (trackersInUse(config).includes('voidtrack') && !readSecret(ctx.configDir, 'voidtrack')) {
+      if (!(await setupKey(ui, ctx.configDir, 'voidtrack'))) ctx.log('VoidTrack is not connected yet. Run vsf agents key --voidtrack.');
+    }
 
-    if (Object.keys(config.workflows).length && (await ui.confirm('Start the background runner now? It checks Linear every minute for cards that start your workflows.'))) {
+    if (Object.keys(config.workflows).length && (await ui.confirm('Start the background runner now? Every minute it checks for cards and schedules that start your workflows.'))) {
       const ok = runnerService().start(ctx.home, [...ctx.selfCommand, 'agents', 'tick'], join(agentsDir(ctx.configDir), 'runner.log'));
       ctx.log(ok ? 'Runner started.' : 'Could not start the runner. Try vsf agents start.');
     }
@@ -1098,11 +1125,17 @@ const agents: Tool = {
           : { name: `agents in ${homeLabel(h)}`, status: 'warn', detail: `missing ${missing.join(', ')}`, fix: `vsf agents link ${tilde(h.dir)}` },
       );
     }
-    try {
-      const me = await linear(ctx.configDir).viewer();
-      checks.push({ name: 'Linear', status: 'ok', detail: `connected as ${me.name}` });
-    } catch (err) {
-      checks.push({ name: 'Linear', status: 'fail', detail: (err as Error).message, fix: 'vsf agents key' });
+    const inUse = trackersInUse(saved);
+    for (const kind of inUse.length ? inUse : (['linear'] as const)) {
+      const { name } = TRACKERS[kind];
+      try {
+        const key = readSecret(ctx.configDir, kind);
+        if (!key) throw new Error(`No ${name} API key`);
+        const me = await (kind === 'voidtrack' ? createVoidTrack(key) : createLinear(key)).viewer();
+        checks.push({ name, status: 'ok', detail: `connected as ${me.name}` });
+      } catch (err) {
+        checks.push({ name, status: 'fail', detail: (err as Error).message, fix: `vsf agents key${kind === 'linear' ? '' : ` --${kind}`}` });
+      }
     }
     const workflows = Object.entries(saved.workflows);
     const broken = workflows.filter(([, c]) => !saved.projects[c.project] || !isRepo(saved.projects[c.project]!.path)).map(([n]) => n);
@@ -1155,19 +1188,24 @@ const agents: Tool = {
     unlink: homeCommands.unlink!,
 
     async key(args, ctx) {
-      const p = begin('key', args, {}, ctx);
+      const p = begin('key', args, { voidtrack: { type: 'boolean' } }, ctx);
       if (typeof p === 'number') return p;
       if (p.positionals.length) {
         ctx.log('Keys are not accepted on the command line. Pipe the key in instead.');
         return 2;
       }
-      if (interactive()) return (await setupKey(ctx.ui, ctx.configDir)) ? 0 : 1;
+      const kind = p.values.voidtrack ? 'voidtrack' : 'linear';
+      if (interactive()) return (await setupKey(ctx.ui, ctx.configDir, kind)) ? 0 : 1;
       const key = readFileSync(0, 'utf8').trim();
-      if (!looksLikeLinearKey(key)) {
+      if (kind === 'linear' && !looksLikeLinearKey(key)) {
         ctx.log('Linear keys start with lin_api_');
         return 2;
       }
-      return (await verifyAndStore(ctx.configDir, key, ctx.log, ctx.log)) ? 0 : 1;
+      if (!key) {
+        ctx.log('No key on stdin.');
+        return 2;
+      }
+      return (await verifyAndStore(ctx.configDir, key, ctx.log, ctx.log, kind)) ? 0 : 1;
     },
 
     async help(args, ctx) {

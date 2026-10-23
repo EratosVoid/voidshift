@@ -2,15 +2,14 @@ import { spawnSync } from 'node:child_process';
 import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
-import { agentsDir, readAgentsConfig } from './config.ts';
-import { readLinearKey } from './secrets.ts';
+import { agentsDir, isCardTrigger, readAgentsConfig, type AgentsConfig, type Tracker as Kind } from './config.ts';
 import { isPaused, listRuns, ours, clearCurrent, liveCurrent, readCurrent, setPaused, writeRun, type Current, type RunEntry } from './state.ts';
 import { runnerService } from './service.ts';
-import { createLinear } from './linear.ts';
+import { TRACKERS, trackersFor, type Tracker, type Trackers } from './tracker.ts';
+import type { Card } from './linear.ts';
 import { parseStep, resolveName, stepNames } from './names.ts';
 import { isStatusLabel } from './workflow.ts';
 import { cancelCard, tick } from './runner.ts';
-import type { Linear } from './linear.ts';
 import type { Check, ToolCommand, ToolContext } from './types.ts';
 
 const HOUR = 3_600_000;
@@ -20,10 +19,26 @@ const ISO_LINE = /^(\d{4}-\d\d-\d\dT[\d:.]+Z)\s*(.*)$/;
 
 export { parsePlistArgs } from './launchd.ts';
 
-function linear(configDir: string) {
-  const key = readLinearKey(configDir);
-  if (!key) throw new Error('No Linear API key. Run vsf agents key');
-  return createLinear(key);
+// Trackers the workflows' card triggers use.
+export const trackersInUse = (config: Pick<AgentsConfig, 'workflows'>): Kind[] => [
+  ...new Set(Object.values(config.workflows).flatMap((w) => w.triggers.filter(isCardTrigger).map((t) => t.source))),
+];
+
+// A card by id, from the tracker of a workflow that starts on its team.
+async function findCard(config: AgentsConfig, trackers: Trackers, id: string): Promise<{ card: Card; tracker: Tracker; source: Kind }> {
+  const team = id.split('-')[0]!.toUpperCase();
+  const sources = [...new Set(Object.values(config.workflows).flatMap((w) => w.triggers.filter(isCardTrigger).filter((t) => t.team === team).map((t) => t.source)))];
+  if (!sources.length) throw new Error(`No workflow starts on team ${team}.`);
+  let last: Error | null = null;
+  for (const source of sources) {
+    try {
+      const tracker = trackers(source);
+      return { card: await tracker.card(id), tracker, source };
+    } catch (err) {
+      last = err as Error;
+    }
+  }
+  throw last!;
 }
 
 const logPath = (configDir: string) => join(agentsDir(configDir), 'runner.log');
@@ -179,7 +194,7 @@ export interface CancelDeps {
   ours: (pid: number) => boolean;
   kill: (pid: number, signal: 'SIGTERM' | 'SIGKILL') => void;
   sleep: (ms: number) => Promise<void>;
-  cancelCard: (card: string, label: string) => Promise<boolean>;
+  cancelCard: (card: string, label: string, source: Kind) => Promise<boolean>;
 }
 
 // Ends the work behind the lock. Only ever signals a pid that is our runner.
@@ -199,7 +214,7 @@ export async function cancelCurrent(ctx: ToolContext, c: Current, deps: CancelDe
         // gone just now
       }
     }
-    ctx.log(c.card ? `Cancelled ${c.card}.` : 'Stopped a check of Linear.');
+    ctx.log(c.card ? `Cancelled ${c.card}.` : 'Stopped a check.');
     return;
   }
   // Dead or a reused pid: no signal, just tidy up what it left behind.
@@ -211,19 +226,25 @@ export async function cancelCurrent(ctx: ToolContext, c: Current, deps: CancelDe
       // the record is only a nicety
     }
   }
-  if (c.card) {
-    const label = readAgentsConfig(ctx.configDir).workflows[c.workflow ?? '']?.triggers[0]?.label ?? "the workflow's label";
-    await deps.cancelCard(c.card, label);
+  if (c.card && c.source !== 'cron') {
+    const first = readAgentsConfig(ctx.configDir).workflows[c.workflow ?? '']?.triggers.find(isCardTrigger);
+    await deps.cancelCard(c.card, first?.label ?? "the workflow's label", c.source ?? 'linear');
     ctx.log(`Cleared a stale lock and cancelled ${c.card}.`);
   } else ctx.log('Cleared a stale lock.');
   clearCurrent(ctx.configDir);
 }
 
-const realDeps = (ctx: ToolContext, l: () => Linear): CancelDeps => ({
+const realDeps = (ctx: ToolContext): CancelDeps => ({
   ours,
   kill: (pid, signal) => process.kill(pid, signal),
   sleep,
-  cancelCard: (card, label) => cancelCard(l(), ctx.configDir, card, label),
+  cancelCard: async (card, label, source) => {
+    try {
+      return await cancelCard(trackersFor(ctx.configDir)(source), ctx.configDir, card, label, source);
+    } catch {
+      return false;
+    }
+  },
 });
 
 async function startCmd(ctx: ToolContext): Promise<number> {
@@ -231,12 +252,16 @@ async function startCmd(ctx: ToolContext): Promise<number> {
     ctx.log('No workflows yet. Create one first: vsf agents workflow add.');
     return 1;
   }
-  try {
-    await linear(ctx.configDir).viewer();
-  } catch (err) {
-    const msg = (err as Error).message;
-    ctx.log(/^No Linear API key/.test(msg) ? msg : `Linear did not accept the key: ${msg}. Run vsf agents key.`);
-    return 1;
+  const trackers = trackersFor(ctx.configDir);
+  for (const kind of trackersInUse(readAgentsConfig(ctx.configDir))) {
+    try {
+      await trackers(kind).viewer();
+    } catch (err) {
+      const msg = (err as Error).message;
+      const flag = kind === 'linear' ? '' : ` --${kind}`;
+      ctx.log(/^No .* API key/.test(msg) ? msg : `${TRACKERS[kind].name} did not accept the key: ${msg}. Run vsf agents key${flag}.`);
+      return 1;
+    }
   }
   setPaused(ctx.configDir, false);
   if (!runnerService().start(ctx.home, program(ctx), logPath(ctx.configDir))) {
@@ -250,7 +275,7 @@ async function stopCmd(ctx: ToolContext): Promise<number> {
   runnerService().stop(ctx.home);
   // Stopping the runner may have stopped the pass; finish or tidy up whatever the lock still names.
   const c = readCurrent(ctx.configDir);
-  if (c) await cancelCurrent(ctx, c, realDeps(ctx, () => linear(ctx.configDir)));
+  if (c) await cancelCurrent(ctx, c, realDeps(ctx));
   ctx.log('Runner stopped.');
   return 0;
 }
@@ -280,7 +305,7 @@ const status = guard(async (args, ctx) => {
     return 0;
   }
   const working = current && !current.card
-    ? ' Checking Linear now.'
+    ? ' Checking now.'
     : current
     ? ` Working on ${current.card ?? 'a card'}${current.title ? ` "${current.title}"` : ''} (${[current.workflow, current.step, current.round !== undefined ? `round ${current.round + 1}` : '', `${current.elapsedMinutes}m`].filter(Boolean).join(', ')}).`
     : '';
@@ -298,7 +323,7 @@ const start = guard(async (args, ctx) => {
   const p = parse('start', args, {}, ctx);
   if (typeof p === 'number') return p;
   const code = await startCmd(ctx);
-  if (!code) ctx.log('Runner started. It checks Linear every minute for cards that start your workflows.');
+  if (!code) ctx.log('Runner started. Every minute it checks for cards and schedules that start your workflows.');
   return code;
 });
 
@@ -357,7 +382,7 @@ const run = guard(async (args, ctx) => {
       return 2;
     }
   }
-  const code = await tick({ configDir: ctx.configDir, config, linear: linear(ctx.configDir), log: ctx.log, selfCommand: ctx.selfCommand }, card, { workflow, from });
+  const code = await tick({ configDir: ctx.configDir, config, trackers: trackersFor(ctx.configDir), log: ctx.log, selfCommand: ctx.selfCommand }, card, { workflow, from });
   if (!card && code === 0) {
     if (isPaused(ctx.configDir)) ctx.log('The runner is paused, so nothing was picked up. vsf agents resume, or name a card.');
     else ctx.log('Nothing to do, or the card was verified.');
@@ -379,7 +404,7 @@ const cancel = guard(async (args, ctx) => {
     ctx.log(`${c.card ?? 'Another card'} is running, not ${card}.`);
     return 1;
   }
-  await cancelCurrent(ctx, c, realDeps(ctx, () => linear(ctx.configDir)));
+  await cancelCurrent(ctx, c, realDeps(ctx));
   return 0;
 });
 
@@ -394,9 +419,16 @@ const retry = guard(async (args, ctx) => {
   }
   const config = readAgentsConfig(ctx.configDir);
   const names = Object.keys(config.workflows);
-  const l = linear(ctx.configDir);
-  const card = await l.card(id!);
-  const startsOn = (n: string) => config.workflows[n]!.triggers.some((t) => t.team === card.teamKey);
+  let found: Awaited<ReturnType<typeof findCard>>;
+  try {
+    found = await findCard(config, trackersFor(ctx.configDir), id!);
+  } catch (err) {
+    ctx.log((err as Error).message);
+    return 1;
+  }
+  const { card, source } = found;
+  const l = found.tracker;
+  const startsOn = (n: string) => config.workflows[n]!.triggers.some((t) => isCardTrigger(t) && t.source === source && t.team === card.teamKey);
   let chosen: string;
   if (p.values.workflow) {
     const r = resolveName(names, p.values.workflow, 'workflow');
@@ -422,7 +454,7 @@ const retry = guard(async (args, ctx) => {
     }
     chosen = candidates[0]!;
   }
-  const label = config.workflows[chosen]!.triggers.find((t) => t.team === card.teamKey)!.label;
+  const label = config.workflows[chosen]!.triggers.filter(isCardTrigger).find((t) => t.source === source && t.team === card.teamKey)!.label;
   const next = card.labels.filter((n) => !isStatusLabel(n));
   if (!next.includes(label)) next.push(label);
   await l.setLabels(card, next);
@@ -470,7 +502,7 @@ const show = guard(async (args, ctx) => {
   }
   let labels: string[] | null = null;
   try {
-    labels = (await linear(ctx.configDir).card(id!)).labels;
+    labels = (await findCard(readAgentsConfig(ctx.configDir), trackersFor(ctx.configDir), id!)).card.labels;
   } catch {
     // live labels are optional
   }
@@ -630,11 +662,7 @@ const tickCmd: ToolCommand = async (_args, ctx) => {
   const stamped = (l: string) => ctx.log(`${new Date().toISOString()} ${l}`);
   try {
     const config = readAgentsConfig(ctx.configDir);
-    if (!readLinearKey(ctx.configDir)) {
-      stamped('No Linear API key. Run vsf agents key.');
-      return 1;
-    }
-    return await tick({ configDir: ctx.configDir, config, linear: linear(ctx.configDir), log: stamped, selfCommand: ctx.selfCommand });
+    return await tick({ configDir: ctx.configDir, config, trackers: trackersFor(ctx.configDir), log: stamped, selfCommand: ctx.selfCommand });
   } catch (err) {
     stamped(`Could not run the check: ${(err as Error).message}`);
     return 1;
@@ -666,7 +694,7 @@ export async function controlChecks(ctx: ToolContext): Promise<Check[]> {
   const state = runnerState(ctx);
   checks.push(
     state === 'running'
-      ? { name: 'agent runner', status: 'ok', detail: 'polling Linear every minute' }
+      ? { name: 'agent runner', status: 'ok', detail: 'checking every minute' }
       : state === 'paused'
         ? { name: 'agent runner', status: 'warn', detail: 'paused', fix: 'vsf agents resume' }
         : { name: 'agent runner', status: 'warn', detail: 'not running', fix: 'vsf agents start' },

@@ -103,8 +103,8 @@ export function createLinear(apiKey: string) {
       return all.map((t) => ({ ...t, mine: mine.has(t.key) })).sort((a, b) => Number(b.mine) - Number(a.mine));
     },
 
-    // My cards carrying the trigger label.
-    async myCardsWithLabel(label: string): Promise<Card[]> {
+    // My cards in the team carrying the trigger label.
+    async myCardsWithLabel(label: string, team: string): Promise<Card[]> {
       const d = await gql(
         'myCards',
         `query MyCards($label: String!) {
@@ -114,7 +114,7 @@ export function createLinear(apiKey: string) {
         }`,
         { label },
       );
-      return (d?.issues?.nodes ?? []).map(mapCard);
+      return (d?.issues?.nodes ?? []).map(mapCard).filter((c: Card) => c.teamKey === team);
     },
 
     async card(identifier: string): Promise<Card> {

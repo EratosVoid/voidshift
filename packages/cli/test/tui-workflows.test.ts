@@ -127,7 +127,8 @@ test('save commands carry full flags', () => {
 });
 
 test('trigger fields make a trigger or complain', () => {
-  assert.deepEqual(makeTrigger(' eng ', ' vs-plan '), { trigger: { team: 'ENG', label: 'vs-plan' } });
+  assert.deepEqual(makeTrigger(' eng ', ' vs-plan '), { trigger: { source: 'linear', team: 'ENG', label: 'vs-plan' } });
+  assert.deepEqual(makeTrigger('voidtrack:org', 'vs-start'), { trigger: { source: 'voidtrack', team: 'ORG', label: 'vs-start' } });
   assert.ok('error' in makeTrigger('', 'x'));
   assert.ok('error' in makeTrigger('ENG', ''));
   assert.ok('error' in makeTrigger('E:G', 'x'));
@@ -278,4 +279,11 @@ test('deleting a used project is refused with a message', async () => {
   assert.equal(spy.ran.length, 0);
   assert.match(spy.toasts[0]!, /used by tether-relay-build/);
   r.unmount();
+});
+
+test('saving keeps VoidTrack and cron triggers in their --trigger form', async () => {
+  const { triggerSpec } = await import('../src/tui/screens/workflows.ts');
+  assert.equal(triggerSpec({ source: 'voidtrack', team: 'ORG', label: 'vs-start' }), 'voidtrack:ORG:vs-start');
+  assert.equal(triggerSpec({ source: 'cron', schedule: '0 5 * * 1', task: 'Tidy: up' }), 'cron:0 5 * * 1:Tidy: up');
+  assert.equal(triggerSpec({ source: 'linear', team: 'ENG', label: 'vs-plan' }), 'ENG:vs-plan');
 });
