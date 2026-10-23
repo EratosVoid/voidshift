@@ -10,7 +10,7 @@ import type { ActionResult } from './actions.ts';
 import type { DataState } from './data.ts';
 import { editText, Panel } from './widgets.ts';
 import { theme } from './theme.ts';
-import { useData } from './data.ts';
+import { liveRunsOf, useData } from './data.ts';
 
 const h = React.createElement;
 
@@ -119,8 +119,7 @@ export function dynamicEntries(state: Pick<DataState, 'agents' | 'runs' | 'steps
   const nameOf = (id: string) => state.steps?.steps.find((s) => s.id === id)?.name ?? id.replace(/^vs-/, '');
   for (const p of state.agents?.parked ?? []) add(`agents retry ${p.card}`, 'queue the parked card again');
   for (const c of state.agents?.interrupted ?? []) add(`agents retry ${c}`, 'queue the interrupted card again');
-  const live = state.agents?.current?.card;
-  if (live) add(`agents cancel ${live}`, 'stop the card being worked on');
+  for (const live of liveRunsOf(state.agents)) if (live.card) add(`agents cancel ${live.card}`, 'stop the card being worked on');
   const cards = new Set<string>();
   for (const r of state.runs) {
     if (cards.size >= 6 && !cards.has(r.card)) continue;

@@ -3,7 +3,7 @@
 // shaping of the store's data into lines (tested); the component below draws them.
 import React, { useEffect, useState } from 'react';
 import { Box, Text } from 'ink';
-import { useData, runsThisWeek, updateNotice, type AgentsStatus, type AwakeStatus, type DataState, type MemoryStatus, type RunItem } from './data.ts';
+import { liveRunsOf, useData, runsThisWeek, updateNotice, type AgentsCurrent, type AgentsStatus, type AwakeStatus, type DataState, type MemoryStatus, type RunItem } from './data.ts';
 import { useHints, useKeys, useScreen, type Hint } from './context.ts';
 import { clock, clockOrStamp, duration, minutesText, plural, secondsToNextCheck, tilde, truncate } from './format.ts';
 import { theme } from './theme.ts';
@@ -39,6 +39,7 @@ export const clampFocus = (sections: SectionId[], current: SectionId): SectionId
 
 export interface LiveCard {
   card: string;
+  workspace?: string;
   title: string;
   workflow: string;
   step: string;
@@ -53,10 +54,22 @@ const titleCase = (id: string) => {
   return t.charAt(0).toUpperCase() + t.slice(1);
 };
 
-// The card being worked on, with the progress of each step of its workflow.
-export function liveCard(state: Pick<DataState, 'agents' | 'runs' | 'workflows' | 'steps' | 'agentsConfig'>, nowMs: number): LiveCard | null {
-  const current = state.agents?.current;
-  if (!current || !current.card) return null;
+type LiveState = Pick<DataState, 'agents' | 'runs' | 'workflows' | 'steps' | 'agentsConfig'>;
+
+// The cards being worked on, one per busy workspace, in workspace order.
+export function liveCards(state: LiveState, nowMs: number): LiveCard[] {
+  return liveRunsOf(state.agents)
+    .map((c) => liveCardOf(c, state, nowMs))
+    .filter((c): c is LiveCard => !!c)
+    .sort((a, b) => (a.workspace ?? '').localeCompare(b.workspace ?? ''));
+}
+
+// The first card being worked on.
+export const liveCard = (state: LiveState, nowMs: number): LiveCard | null => liveCards(state, nowMs)[0] ?? null;
+
+// A card being worked on, with the progress of each step of its workflow.
+function liveCardOf(current: AgentsCurrent, state: LiveState, nowMs: number): LiveCard | null {
+  if (!current.card) return null;
   const run: RunItem | undefined = state.runs.find(
     (r) => r.card === current.card && r.record?.outcome === 'running' && (!current.runDir || r.dir === current.runDir),
   );
@@ -91,11 +104,13 @@ export function liveCard(state: Pick<DataState, 'agents' | 'runs' | 'workflows' 
   const startedAt = Date.parse(current.startedAt ?? rec?.startedAt ?? '');
   return {
     card: current.card,
+    workspace: current.workspace,
     title: current.title ?? rec?.title ?? '',
     workflow: current.workflow ?? rec?.workflow ?? '',
     step: current.step ?? '',
     minutes: current.elapsedMinutes ?? (Number.isNaN(startedAt) ? 0 : Math.max(0, Math.round((nowMs - startedAt) / 60_000))),
-    round: (current.round ?? 0) + 1,
+    // The lock's round is 1-based like the card's label; 0 before the first.
+    round: current.round || 1,
     maxRounds: workflow?.maxRounds ?? null,
     steps,
   };
@@ -345,23 +360,23 @@ function AgentsPanel(props: { focused: boolean; selected: number; now: number })
   if (!agents) return h(Panel, { title: 'Agents', focused: props.focused }, toolState(state.errors.agents));
 
   const run = runnerLines(agents, props.now);
-  const live = liveCard(state, props.now);
+  const lives = liveCards(state, props.now);
   const parked = parkedRows(agents);
   const rows: React.ReactNode[] = [h(SplitRow, { key: 'runner', left: run.left, right: run.right })];
 
-  if (live) {
-    rows.push(h(Text, { key: 'g1' }, ' '));
+  for (const live of lives) {
+    rows.push(h(Text, { key: `g1${live.card}` }, ' '));
     rows.push(
       h(SplitRow, {
-        key: 'live',
+        key: `live${live.card}`,
         left: [seg('▶ ', theme.accent), seg(live.card, theme.accent, { bold: true }), seg(`  ${truncate(live.title, 60)}`)],
-        right: [seg(live.workflow, theme.dim)],
+        right: [seg(live.workspace && live.workspace !== 'default' ? `${live.workspace} · ${live.workflow}` : live.workflow, theme.dim)],
       }),
     );
     rows.push(
       h(
         Box,
-        { key: 'steps', flexDirection: 'row' },
+        { key: `steps${live.card}`, flexDirection: 'row' },
         h(Text, null, '  '),
         h(ProgressSteps, { steps: live.steps }),
         h(
@@ -371,7 +386,8 @@ function AgentsPanel(props: { focused: boolean; selected: number; now: number })
         ),
       ),
     );
-  } else if (agents.current) {
+  }
+  if (!lives.length && agents.current) {
     rows.push(h(Text, { key: 'g1' }, ' '));
     rows.push(h(Text, { key: 'checking', color: theme.dim }, '  Checking Linear now.'));
   }

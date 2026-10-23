@@ -100,7 +100,23 @@ export interface Project {
   path: string;
   // Branch pull requests go into; the repo's default branch when unset.
   base?: string;
+  // The workspace whose queue its runs wait in; the default one when unset.
+  workspace?: string;
+  // Tracker project names whose cards run here, whatever the workflow's project.
+  match?: string[];
 }
+
+// A workspace is a folder of repos with one run queue: cards in different
+// workspaces run side by side, two in one workspace one after the other.
+export interface Workspace {
+  root: string;
+  // A file every step's prompt carries; <root>/CONTEXT.md when unset.
+  context?: string;
+}
+
+export const DEFAULT_WORKSPACE = 'default';
+export const WORKSPACE_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+export const workspaceOf = (project: Pick<Project, 'workspace'> | undefined) => project?.workspace || DEFAULT_WORKSPACE;
 
 // What a card run writes back to the tracker. Unset keeps the defaults: stage
 // labels on, the card moved to reviewState when the workflow makes commits,
@@ -127,6 +143,7 @@ export interface AgentsConfig {
   // Per step model; unset means the engine's default.
   models: { dev?: string; review?: string };
   projects: Record<string, Project>;
+  workspaces: Record<string, Workspace>;
   workflows: Record<string, Workflow>;
   // Linear state a verified card moves to.
   reviewState: string;
@@ -153,6 +170,7 @@ export const DEFAULTS: AgentsConfig = {
   engine: 'claude',
   models: { dev: 'opus', review: 'sonnet' },
   projects: {},
+  workspaces: {},
   workflows: {},
   reviewState: 'In Review',
   timeoutMinutes: 45,
@@ -257,6 +275,46 @@ export function writeAgentsConfig(configDir: string, config: AgentsConfig): void
   const { folders, ...rest } = config;
   const workflows = Object.fromEntries(Object.entries(config.workflows).filter(([name]) => !folders?.[name]));
   writeFileSync(configPath(configDir), JSON.stringify({ ...rest, workflows }, null, 2) + '\n');
+}
+
+// Every workspace a config uses: the named ones, then any a project names,
+// the default one included.
+export const workspacesInUse = (config: Pick<AgentsConfig, 'projects' | 'workspaces'>): string[] => [
+  ...new Set([...Object.keys(config.workspaces ?? {}), ...Object.values(config.projects).map(workspaceOf)]),
+];
+
+// Whether a match entry names a tracker project: the whole name, or its first
+// word, so "DS06" matches "DS06 Atleurope ERP". Case does not matter.
+export function matchesProject(entry: string, projectName: string): boolean {
+  const want = entry.trim().toLowerCase();
+  const name = projectName.trim().toLowerCase();
+  return !!want && (want === name || want === name.split(/\s+/)[0]);
+}
+
+// The project a card runs in. Explicit matches on the card's tracker project
+// come first, in every workspace, and only then the workflow's own project.
+// A scheduled run has no tracker project, so it always takes the workflow's.
+export function resolveProject(config: Pick<AgentsConfig, 'projects'>, workflow: Pick<Workflow, 'project'>, card: { projectName?: string }): { name: string; project: Project } | null {
+  if (card.projectName) {
+    for (const [name, project] of Object.entries(config.projects)) {
+      if (project.match?.some((m) => matchesProject(m, card.projectName!))) return { name, project };
+    }
+  }
+  const project = config.projects[workflow.project];
+  return project ? { name: workflow.project, project } : null;
+}
+
+// The workspace's context text for the step prompts: its context file, or
+// CONTEXT.md in its root. Empty when there is none.
+export function workspaceContext(config: Pick<AgentsConfig, 'workspaces'>, name: string): string {
+  const ws = config.workspaces?.[name];
+  if (!ws) return '';
+  const file = ws.context ? resolve(ws.root, ws.context) : join(ws.root, 'CONTEXT.md');
+  try {
+    return readFileSync(file, 'utf8').trim();
+  } catch {
+    return '';
+  }
 }
 
 // One step with every setting it runs with filled in.

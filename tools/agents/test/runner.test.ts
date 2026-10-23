@@ -1,18 +1,19 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
-import { cancelCard, nextJob, runCard, summarize, tick, type RunContext } from '../src/runner.ts';
+import { cancelCard, dispatch, findJobs, nextJob, runCard, summarize, tick, type ChildRun, type RunContext } from '../src/runner.ts';
 import { DEFAULTS } from '../src/config.ts';
 import type { Card } from '../src/linear.ts';
 import type { Tracker } from '../src/tracker.ts';
 type Linear = Tracker;
 import { agentsDir } from '../src/config.ts';
-import { lockPath, readPending, setPaused, writePending } from '../src/state.ts';
+import { lockPath, readCronState, readPending, setPaused, workspaceLockPath, writeCronState, writePending } from '../src/state.ts';
 
-const card = (labels: string[], teamKey = 'ENG'): Card => ({ id: '1', identifier: 'ENG-1', title: 'T', url: 'u', branchName: 'b', teamId: 't', teamKey, labels });
+const card = (labels: string[], teamKey = 'ENG', identifier = 'ENG-1', projectName?: string): Card => ({ id: '1', identifier, title: 'T', url: 'u', branchName: 'b', teamId: 't', teamKey, labels, projectName });
 
 function setup(linear: Partial<Linear>, workflows: RunContext['config']['workflows'] = {}) {
   const configDir = mkdtempSync(join(tmpdir(), 'vsf-runner-'));
@@ -38,11 +39,65 @@ test('summarize keeps the first three non-empty lines, cut to 300 chars', () => 
   assert.equal(summarize(''), '');
 });
 
-test('a paused tick returns 0 and never calls Linear', async () => {
+// Child runs the dispatcher starts: each records its arguments and exits
+// when the test lets it, or at once.
+function fakeStarts(events: string[], hold = false) {
+  const children: (EventEmitter & ChildRun)[] = [];
+  const start = (args: string[]) => {
+    const child = Object.assign(new EventEmitter(), { exitCode: null as number | null, kill: () => true });
+    const card = args[args.indexOf('--card') + 1] ?? args.join(' ');
+    events.push(`start ${card}`);
+    children.push(child);
+    const exit = () => {
+      events.push(`exit ${card}`);
+      child.exitCode = 0;
+      child.emit('exit');
+    };
+    if (!hold) setImmediate(exit);
+    else (child as unknown as { exit: () => void }).exit = exit;
+    return child;
+  };
+  return { start, children, waitMs: 60_000 };
+}
+
+// Two workspaces, wa and wb, with a project in each that claims a tracker project.
+function twoWorkspaces(rc: RunContext, root: string) {
+  rc.config.workspaces = { wa: { root }, wb: { root } };
+  rc.config.projects = { a: { path: '/a', workspace: 'wa', match: ['Alpha'] }, b: { path: '/b', workspace: 'wb', match: ['Beta'] } };
+}
+
+test('a paused dispatcher returns 0 and never calls Linear', async () => {
   const { rc, configDir } = setup(new Proxy({}, { get: () => () => assert.fail('Linear was called') }) as Partial<Linear>);
   setPaused(configDir, true);
-  assert.equal(await tick(rc), 0);
+  assert.equal(await dispatch(rc, fakeStarts([])), 0);
   assert.equal(existsSync(lockPath(configDir)), false);
+});
+
+test('cards in two workspaces start side by side in one pass', async () => {
+  const events: string[] = [];
+  const { rc, configDir } = setup({ myCardsWithLabel: async () => [card(['a'], 'ENG', 'ENG-1', 'Alpha Corp'), card(['a'], 'ENG', 'ENG-2', 'Beta')] }, { one: wf('a') });
+  twoWorkspaces(rc, configDir);
+  assert.equal(await dispatch(rc, fakeStarts(events)), 0);
+  assert.deepEqual(events.slice(0, 2), ['start ENG-1', 'start ENG-2']);
+  assert.equal(events.length, 4);
+  assert.equal(existsSync(lockPath(configDir)), false);
+});
+
+test('two cards in one workspace run one after the other', async () => {
+  const events: string[] = [];
+  const { rc, configDir } = setup({ myCardsWithLabel: async () => [card(['a'], 'ENG', 'ENG-1', 'Alpha'), card(['a'], 'ENG', 'ENG-2', 'Alpha')] }, { one: wf('a') });
+  twoWorkspaces(rc, configDir);
+  assert.equal(await dispatch(rc, fakeStarts(events)), 0);
+  assert.deepEqual(events, ['start ENG-1', 'exit ENG-1', 'start ENG-2', 'exit ENG-2']);
+});
+
+test('a child run gets the card and workflow it is for', async () => {
+  const { rc } = setup({ myCardsWithLabel: async () => [card(['a'])] }, { one: wf('a') });
+  rc.config.projects.p = { path: '/p' };
+  const seen: string[][] = [];
+  const starts = fakeStarts([]);
+  await dispatch(rc, { ...starts, start: (args) => (seen.push(args), starts.start(args)) });
+  assert.deepEqual(seen, [['--card', 'ENG-1', '--workflow', 'one']]);
 });
 
 test('pending writes are flushed and pending.json removed', async () => {
@@ -75,10 +130,10 @@ test('nextJob with a workflow name only matches that workflow', async () => {
   assert.equal(await nextJob(rc, undefined, 'missing'), null);
 });
 
-test('a stale lock does not block tick', async () => {
+test('a stale lock does not block the dispatcher', async () => {
   const { rc, configDir } = setup({ myCardsWithLabel: async () => [] }, { one: wf('a') });
   writeFileSync(lockPath(configDir), JSON.stringify({ pid: 999999999 }));
-  assert.equal(await tick(rc), 0);
+  assert.equal(await dispatch(rc, fakeStarts([])), 0);
   assert.equal(existsSync(lockPath(configDir)), false);
 });
 
@@ -87,12 +142,12 @@ function fakeRunner() {
   return spawn(process.execPath, ['-e', 'setTimeout(() => {}, 20000)', 'agents', 'tick'], { stdio: 'ignore' });
 }
 
-test('a live runner lock makes tick return 0 and leaves the lock alone', async () => {
+test('a live dispatcher lock makes another return 0 and leaves the lock alone', async () => {
   const child = fakeRunner();
   try {
     const { rc, configDir } = setup(new Proxy({}, { get: () => () => assert.fail('Linear was called') }) as Partial<Linear>);
     writeFileSync(lockPath(configDir), JSON.stringify({ pid: child.pid, startedAt: new Date().toISOString() }));
-    assert.equal(await tick(rc), 0);
+    assert.equal(await dispatch(rc, fakeStarts([])), 0);
     assert.equal(existsSync(lockPath(configDir)), true);
   } finally {
     child.kill();
@@ -102,7 +157,7 @@ test('a live runner lock makes tick return 0 and leaves the lock alone', async (
 test('a live pid that is not our runner is a stale lock', async () => {
   const { rc, configDir } = setup({ myCardsWithLabel: async () => [] }, { one: wf('a') });
   writeFileSync(lockPath(configDir), JSON.stringify({ pid: process.ppid }));
-  assert.equal(await tick(rc), 0);
+  assert.equal(await dispatch(rc, fakeStarts([])), 0);
   assert.equal(existsSync(lockPath(configDir)), false);
 });
 
@@ -111,23 +166,60 @@ test('a lock from before the boot is stale', async () => {
   try {
     const { rc, configDir } = setup({ myCardsWithLabel: async () => [] }, { one: wf('a') });
     writeFileSync(lockPath(configDir), JSON.stringify({ pid: child.pid, startedAt: '2000-01-01T00:00:00.000Z' }));
-    assert.equal(await tick(rc), 0);
+    assert.equal(await dispatch(rc, fakeStarts([])), 0);
     assert.equal(existsSync(lockPath(configDir)), false);
   } finally {
     child.kill();
   }
 });
 
-test('a busy runner with a pinned card says so and returns 1', async () => {
+// A workspace lock held by a live runner.
+function holdWorkspace(configDir: string, workspace: string, pid: number, cardId = 'ENG-9') {
+  mkdirSync(join(agentsDir(configDir), 'locks'), { recursive: true });
+  writeFileSync(workspaceLockPath(configDir, workspace), JSON.stringify({ pid, card: cardId, workspace, startedAt: new Date().toISOString() }));
+}
+
+test('a busy workspace turns a pinned card away but lets another workspace run', async () => {
   const child = fakeRunner();
   try {
-    const { rc, configDir, logs } = setup(new Proxy({}, { get: () => () => assert.fail('Linear was called') }) as Partial<Linear>);
-    writeFileSync(lockPath(configDir), JSON.stringify({ pid: child.pid, card: 'ENG-9', startedAt: new Date().toISOString() }));
+    const events: string[] = [];
+    const cards = [card(['a'], 'ENG', 'ENG-1', 'Alpha'), card(['a'], 'ENG', 'ENG-2', 'Beta')];
+    const { rc, configDir, logs } = setup({ card: async (id) => cards.find((c) => c.identifier === id)!, myCardsWithLabel: async () => cards }, { one: wf('a') });
+    twoWorkspaces(rc, configDir);
+    holdWorkspace(configDir, 'wa', child.pid!);
     assert.equal(await tick(rc, 'ENG-1'), 1);
-    assert.deepEqual(logs, ['The runner is busy with ENG-9. Try again when it finishes.']);
+    assert.deepEqual(logs, ['Workspace wa is busy with ENG-9. Try again when it finishes.']);
+    assert.equal(await dispatch(rc, fakeStarts(events)), 0);
+    assert.deepEqual(events, ['start ENG-2', 'exit ENG-2']);
+    assert.equal(JSON.parse(readFileSync(workspaceLockPath(configDir, 'wa'), 'utf8')).card, 'ENG-9', 'the held lock is left alone');
   } finally {
     child.kill();
   }
+});
+
+test('a schedule whose workspace is busy waits and is not marked as fired', async () => {
+  const child = fakeRunner();
+  try {
+    const { rc, configDir } = setup({}, { nightly: { ...wf('a'), triggers: [{ source: 'cron', schedule: '* * * * *', task: 'Tidy' }] } });
+    rc.config.projects.p = { path: '/p' };
+    const last = new Date(Date.now() - 5 * 60_000).toISOString();
+    writeCronState(configDir, { 'nightly * * * * *': last });
+    holdWorkspace(configDir, 'default', child.pid!);
+    assert.deepEqual(await findJobs(rc, { busy: new Set(['default']) }), []);
+    assert.equal(readCronState(configDir)['nightly * * * * *'], last);
+    assert.equal((await findJobs(rc))[0]?.workflow, 'nightly');
+    assert.notEqual(readCronState(configDir)['nightly * * * * *'], last);
+  } finally {
+    child.kill();
+  }
+});
+
+test('a card matched by its tracker project runs in that project, ahead of the workflow default', async () => {
+  const { rc, configDir } = setup({ myCardsWithLabel: async () => [card(['a'], 'ENG', 'ENG-1', 'Beta Ltd')] }, { one: { ...wf('a'), project: 'a' } });
+  twoWorkspaces(rc, configDir);
+  assert.equal((await nextJob(rc))?.workspace, 'wb');
+  rc.linear.myCardsWithLabel = async () => [card(['a'], 'ENG', 'ENG-1', 'Gamma')];
+  assert.equal((await nextJob(rc))?.workspace, 'wa', 'no match: the workflow project');
 });
 
 test('a pinned card matches by team without the label; an unpinned one needs it', async () => {
@@ -164,10 +256,10 @@ test('park does not repeat the comment when only setLabels failed', async () => 
   assert.equal(pending[0]!.comment, '');
 });
 
-test('runCard writes the lock with the card before calling Linear', async () => {
+test('runCard writes the workspace lock with the card before calling Linear', async () => {
   let seen: unknown;
   const { rc, configDir } = setup({
-    comments: async () => { seen = JSON.parse(readFileSync(lockPath(configDir), 'utf8')); throw new Error('stop'); },
+    comments: async () => { seen = JSON.parse(readFileSync(workspaceLockPath(configDir, 'default'), 'utf8')); throw new Error('stop'); },
     comment: async () => {},
     setLabels: async () => {},
   });
@@ -177,6 +269,7 @@ test('runCard writes the lock with the card before calling Linear', async () => 
   await runCard(card(['a']), wf('a').triggers[0]!, 'one', wf('a'), rc.config.projects.p, rc);
   assert.equal((seen as { card: string }).card, 'ENG-1');
   assert.equal((seen as { step: string }).step, 'Starting');
+  assert.equal((seen as { workspace: string }).workspace, 'default');
 });
 
 test('cancelCard drops the working label and comments', async () => {

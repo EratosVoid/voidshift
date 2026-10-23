@@ -68,6 +68,25 @@ test('validateConfig checks the whole config', () => {
   assert.equal(validateConfig('x').length, 1);
 });
 
+test('validateConfig checks workspaces, project workspaces and matches', () => {
+  const repo = mkdtempSync(join(tmpdir(), 'vsf-repo-'));
+  mkdirSync(join(repo, '.git'));
+  const good: AgentsConfig = {
+    ...structuredClone(DEFAULTS),
+    workspaces: { solvia: { root: tmpdir() } },
+    projects: { p: { path: repo, workspace: 'solvia', match: ['DS06'] }, q: { path: repo, workspace: 'default', match: ['DS14'] } },
+    workflows: { w: wf() },
+    enabled: ['vs-dev', 'vs-qa'],
+  };
+  assert.deepEqual(validateConfig(good), []);
+  const { workspaces: _w, ...old } = good;
+  assert.deepEqual(validateConfig({ ...old, projects: { p: { path: repo } } }), [], 'a config from before workspaces');
+  assert.match(validateConfig({ ...good, projects: { ...good.projects, p: { path: repo, workspace: 'tether' } } }).join(' '), /Project p: workspace tether does not exist/);
+  assert.match(validateConfig({ ...good, projects: { ...good.projects, q: { path: repo, match: ['ds06'] } } }).join(' '), /Projects p and q both match ds06/);
+  assert.match(validateConfig({ ...good, workspaces: { solvia: { root: '/no/such/root' } } }).join(' '), /Workspace solvia: \/no\/such\/root does not exist/);
+  assert.deepEqual(validateConfig({ ...good, workspaces: { solvia: { root: '/no/such/root' } } }, { ...good, workspaces: { solvia: { root: '/no/such/root' } } }), [], 'an unchanged root is not checked');
+});
+
 test('validateConfig only checks repos and steps the write introduces', () => {
   const repo = mkdtempSync(join(tmpdir(), 'vsf-repo-'));
   mkdirSync(join(repo, '.git'));

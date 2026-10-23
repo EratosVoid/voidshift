@@ -10,7 +10,7 @@ import { useData, type RunItem } from '../data.ts';
 import { Lines, Panel, seg, type Line } from '../widgets.ts';
 import { theme } from '../theme.ts';
 import type { Screen } from '../screens.ts';
-import { cancelSpec, isLive, settledSteps, stepDuration, stepMark } from './runs.ts';
+import { cancelSpec, liveRunFor, settledSteps, stepDuration, stepMark } from './runs.ts';
 
 const h = React.createElement;
 
@@ -176,7 +176,8 @@ export function LogView(props: { params: Record<string, unknown> }): React.React
   const card = String(props.params.card ?? '');
   const dir = typeof props.params.dir === 'string' ? props.params.dir : null;
   const run = state.runs.find((r) => (dir ? r.dir === dir : r.card === card));
-  const live = isLive(run, state);
+  const cur = liveRunFor(run, state);
+  const live = !!cur;
   const record = run?.record;
 
   const [picked, setPicked] = useState<string | null>(null);
@@ -226,7 +227,7 @@ export function LogView(props: { params: Record<string, unknown> }): React.React
       }
     } else if (input === 'c') {
       if (!live) ctx.toast(`${card} is not running, so there is nothing to cancel.`, 'info');
-      else void ctx.actions.run(cancelSpec(card, state.agents?.current?.step));
+      else void ctx.actions.run(cancelSpec(card, cur?.step));
     }
   });
 
@@ -243,8 +244,8 @@ export function LogView(props: { params: Record<string, unknown> }): React.React
   });
   if (!steps.length) left.push([seg('No steps yet', theme.dim)]);
   const workflow = state.workflows.find((w) => w.name === record?.workflow);
-  const cur = state.agents?.current;
-  const round = live && cur?.round !== undefined ? cur.round + 1 : Math.max(1, steps.filter((s) => s.step === steps[0]?.step).length);
+  // The lock's round is 1-based like the card's label; 0 before the first.
+  const round = cur?.round ? cur.round : Math.max(1, steps.filter((s) => s.step === steps[0]?.step).length);
   left.push([], [seg(`round ${round}${workflow?.maxRounds ? ` of ${workflow.maxRounds}` : ''}`, theme.dim)], []);
   run.logs.forEach((l) => {
     const on = l === file;

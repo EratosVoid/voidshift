@@ -48,6 +48,14 @@ test('steps label, rounds and outcome', () => {
   assert.equal(logStepOf(run('ENG-3'))?.step, 'vs-qa');
 });
 
+test('a run is live while any workspace is on it', () => {
+  const r = run('ENG-1', {}, 'running');
+  const two: AgentsStatus = { ...agents('ENG-2'), running: [{ pid: 2, card: 'ENG-2', workspace: 'a' }, { pid: 3, card: 'ENG-1', workspace: 'b' }] };
+  assert.equal(outcomeOf(r, { agents: two }), 'running');
+  assert.equal(isLive(r, { agents: two }), true);
+  assert.equal(outcomeOf(r, { agents: { ...two, running: [] } }), 'interrupted');
+});
+
 test('key map and tab keys', () => {
   assert.equal(runsKey('c', {}), 'cancel');
   assert.equal(runsKey('r', {}), 'retry');

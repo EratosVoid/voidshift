@@ -4,7 +4,7 @@ import { homedir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { AGENTS, AGENT_FILE, STEPS, TEMPLATES, isProducer, agentFolders, agentsDir, describeSteps, describeTrigger, describeTriggers, describeWorkflow, stepEnabled, stepId, visibleAgents, readAgentsConfig, writeAgentsConfig, DEFAULTS, type AgentsConfig, type Project, type Step, type StepId, type Trigger, type Workflow } from './config.ts';
+import { AGENTS, AGENT_FILE, STEPS, TEMPLATES, isProducer, agentFolders, agentsDir, describeSteps, describeTrigger, describeTriggers, describeWorkflow, stepEnabled, stepId, visibleAgents, readAgentsConfig, writeAgentsConfig, workspaceOf, DEFAULTS, DEFAULT_WORKSPACE, WORKSPACE_NAME, type AgentsConfig, type Project, type Step, type StepId, type Trigger, type Workflow } from './config.ts';
 import { controlChecks, controlCommands, controlUsage } from './control.ts';
 import { keyStore, looksLikeLinearKey, readLinearKey, readSecret, storeLinearKey, storeSecret } from './secrets.ts';
 import { TRACKERS } from './tracker.ts';
@@ -14,7 +14,7 @@ import { trackersInUse } from './control.ts';
 import { runnerService } from './service.ts';
 import { initProfile, profileChecks, profileDir, readRules, renderClaudeSettings, CLAUDE_SETTINGS, RULES_FILE } from './profile.ts';
 import { createLinear } from './linear.ts';
-import { TRIGGER_FORMS, duplicateTriggerWarnings, moveKey, parseTrigger, renameKey, sameTrigger, validateAgentFolder, validateConfig, validateWorkflow, workflowsUsing, type Place } from './manage.ts';
+import { TRIGGER_FORMS, duplicateTriggerWarnings, moveKey, parseTrigger, projectProblems, renameKey, sameTrigger, validateAgentFolder, validateConfig, validateWorkflow, workflowsUsing, type Place } from './manage.ts';
 import { parseStep, resolveName, stepNames } from './names.ts';
 import { findRepos } from './repos.ts';
 import { defaultBranch, sh } from './git.ts';
@@ -253,7 +253,8 @@ async function promptProject(ui: Ui, config: AgentsConfig, current: { name?: str
 const describeProject = (config: AgentsConfig, name: string) => {
   const p = config.projects[name]!;
   const used = workflowsUsing(config, name);
-  return `${name}  ${tilde(p.path)}, PRs into ${p.base ?? 'the default branch'}, ${used.length ? `used by ${used.join(', ')}` : 'not used by any workflow'}`;
+  const where = [p.workspace ? `workspace ${p.workspace}` : '', p.match?.length ? `matches ${p.match.join(', ')}` : ''].filter(Boolean);
+  return `${name}  ${tilde(p.path)}, PRs into ${p.base ?? 'the default branch'}, ${where.map((w) => `${w}, `).join('')}${used.length ? `used by ${used.join(', ')}` : 'not used by any workflow'}`;
 };
 
 // Named local repos the workflows run in. Triggers point at them by name.
@@ -410,11 +411,14 @@ const USAGE: [string, string][] = [
   ['workflow rm NAME [--yes]', 'Delete a workflow'],
   ['workflow move NAME (--first | --last | --before OTHER | --after OTHER)', 'Change the match order'],
   ['projects [--json]', 'List projects'],
-  ['project add [NAME] [--path P] [--base B]', 'Add a project; prompts for what is missing'],
+  ['project add [NAME] [--path P] [--base B] [--workspace W] [--match NAME]...', 'Add a project; prompts for what is missing. --match routes cards of that tracker project here, whatever the workflow says'],
   ['project show NAME [--json]', 'Show one project'],
-  ['project edit NAME [--path P] [--base B]', 'Change a project; no flags asks'],
+  ['project edit NAME [--path P] [--base B] [--workspace W] [--match NAME]...', 'Change a project; no flags asks. An empty --workspace or --match clears it'],
   ['project rename OLD NEW', 'Rename a project and the workflows that use it'],
   ['project rm NAME [--yes]', 'Delete a project nothing uses'],
+  ['workspace add NAME --root DIR [--context FILE]', 'Add a workspace: a folder of repos with its own run queue. Steps carry FILE, or DIR/CONTEXT.md'],
+  ['workspace list [--json]', 'List workspaces and their projects'],
+  ['workspace rm NAME', 'Delete a workspace no project uses'],
   ['homes [--json]', 'Show where the agents are linked'],
   ['link DIR [--claude | --codex]', 'Link the agents into a config folder'],
   ['unlink DIR', 'Remove the agents from a config folder'],
@@ -817,9 +821,28 @@ function pickProject(config: AgentsConfig, input: string, ctx: ToolContext): str
   return r.name;
 }
 
+const PROJECT_FLAGS = { path: { type: 'string' }, base: { type: 'string' }, workspace: { type: 'string' }, match: { type: 'string', multiple: true } } as const;
+
+// Applies --workspace and --match to a project. An empty value clears either.
+// Returns a complaint when the workspace or a match does not fit.
+function applyWorkspaceFlags(config: AgentsConfig, name: string, project: Project, v: Record<string, any>): string | null {
+  if (v.workspace !== undefined) {
+    const ws = String(v.workspace).trim();
+    if (ws && ws !== DEFAULT_WORKSPACE && !config.workspaces[ws]) return `No workspace named ${ws}. vsf agents workspace add creates it.`;
+    if (ws && ws !== DEFAULT_WORKSPACE) project.workspace = ws;
+    else delete project.workspace;
+  }
+  if (v.match !== undefined) {
+    const match = (v.match as string[]).map((m) => m.trim()).filter(Boolean);
+    if (match.length) project.match = match;
+    else delete project.match;
+  }
+  return projectProblems({ ...config.projects, [name]: project }, config.workspaces)[0] ?? null;
+}
+
 const projectSubs: Record<string, ToolCommand> = {
   async add(args, ctx) {
-    const p = begin('project add', args, { path: { type: 'string' }, base: { type: 'string' } }, ctx);
+    const p = begin('project add', args, PROJECT_FLAGS, ctx);
     if (typeof p === 'number') return p;
     if (p.positionals.length > 1) {
       ctx.log('Give at most one name.');
@@ -863,6 +886,11 @@ const projectSubs: Record<string, ToolCommand> = {
       name = r.name;
       project = r.project;
     }
+    const bad = applyWorkspaceFlags(config, name, project, p.values);
+    if (bad) {
+      ctx.log(bad);
+      return 1;
+    }
     config.projects[name] = project;
     save(ctx, config);
     ctx.log(`Project ${name}: ${tilde(project.path)}${project.base ? `, PRs into ${project.base}` : ''}`);
@@ -883,13 +911,15 @@ const projectSubs: Record<string, ToolCommand> = {
       ctx.log(`Project ${name}`);
       ctx.log(`Path: ${tilde(proj.path)}`);
       ctx.log(`PRs into: ${proj.base ?? 'the default branch'}`);
+      ctx.log(`Workspace: ${workspaceOf(proj)}`);
+      if (proj.match?.length) ctx.log(`Matches: ${proj.match.join(', ')}`);
       ctx.log(`Used by: ${used.length ? used.join(', ') : 'no workflows'}`);
     }
     return 0;
   },
 
   async edit(args, ctx) {
-    const p = begin('project edit', args, { path: { type: 'string' }, base: { type: 'string' } }, ctx);
+    const p = begin('project edit', args, PROJECT_FLAGS, ctx);
     if (typeof p === 'number') return p;
     if (!needArgs(p, 1, 'project edit', ctx)) return 2;
     const config = readAgentsConfig(ctx.configDir);
@@ -897,16 +927,17 @@ const projectSubs: Record<string, ToolCommand> = {
     if (!name) return 1;
     const current = config.projects[name]!;
     const v = p.values;
-    if (v.path === undefined && v.base === undefined) {
+    if (v.path === undefined && v.base === undefined && v.workspace === undefined && v.match === undefined) {
       if (!interactive()) {
-        ctx.log('Nothing to change. Give --path or --base, or run this in a terminal to be asked.');
+        ctx.log('Nothing to change. Give --path, --base, --workspace or --match, or run this in a terminal to be asked.');
         ctx.log(usageOf('project edit'));
         return 2;
       }
       config.projects[name] = (await promptProject(ctx.ui, config, { name, path: current.path, base: current.base }, true)).project;
     } else {
       const path = v.path !== undefined ? resolve(expandHome(v.path)) : current.path;
-      if (!isRepo(path)) {
+      // Only a new path needs checking; a workspace or match change keeps the repo.
+      if (v.path !== undefined && !isRepo(path)) {
         ctx.log(`${tilde(path)} is not a git repository.`);
         return 1;
       }
@@ -915,6 +946,11 @@ const projectSubs: Record<string, ToolCommand> = {
       if (v.base !== undefined) {
         if (v.base) next.base = v.base;
         else delete next.base;
+      }
+      const bad = applyWorkspaceFlags(config, name, next, v);
+      if (bad) {
+        ctx.log(bad);
+        return 1;
       }
       config.projects[name] = next;
     }
@@ -967,6 +1003,86 @@ const projectSubs: Record<string, ToolCommand> = {
     delete config.projects[name];
     save(ctx, config);
     ctx.log(`Deleted project ${name}.`);
+    return 0;
+  },
+};
+
+// ---- workspaces ----
+
+const projectsIn = (config: AgentsConfig, ws: string) => Object.entries(config.projects).filter(([, p]) => workspaceOf(p) === ws).map(([n]) => n);
+
+const workspaceSubs: Record<string, ToolCommand> = {
+  async add(args, ctx) {
+    const p = begin('workspace add', args, { root: { type: 'string' }, context: { type: 'string' } }, ctx);
+    if (typeof p === 'number') return p;
+    if (!needArgs(p, 1, 'workspace add', ctx)) return 2;
+    const name = p.positionals[0]!.trim();
+    if (!WORKSPACE_NAME.test(name)) {
+      ctx.log('A workspace name is letters, digits, dashes and underscores.');
+      return 2;
+    }
+    if (!p.values.root) {
+      ctx.log('Missing --root.');
+      ctx.log(usageOf('workspace add'));
+      return 2;
+    }
+    const config = readAgentsConfig(ctx.configDir);
+    if (config.workspaces[name]) {
+      ctx.log(`A workspace named ${name} already exists.`);
+      return 1;
+    }
+    const root = resolve(expandHome(p.values.root));
+    if (!existsSync(root)) {
+      ctx.log(`${tilde(root)} does not exist.`);
+      return 1;
+    }
+    const context = p.values.context ? resolve(root, expandHome(p.values.context)) : undefined;
+    if (context && !existsSync(context)) {
+      ctx.log(`${tilde(context)} does not exist.`);
+      return 1;
+    }
+    config.workspaces[name] = { root, ...(context ? { context } : {}) };
+    save(ctx, config);
+    ctx.log(`Workspace ${name}: ${tilde(root)}. vsf agents project edit P --workspace ${name} puts a project in it.`);
+    return 0;
+  },
+
+  async list(args, ctx) {
+    const p = begin('workspace list', args, { json: { type: 'boolean' } }, ctx);
+    if (typeof p === 'number') return p;
+    const config = readAgentsConfig(ctx.configDir);
+    const names = [...new Set([...Object.keys(config.workspaces), ...Object.values(config.projects).map(workspaceOf)])];
+    if (p.values.json) {
+      out(ctx, names.map((name) => ({ name, ...config.workspaces[name], projects: projectsIn(config, name) })));
+      return 0;
+    }
+    if (!names.length) ctx.log('No workspaces yet. Every project runs in the default one; vsf agents workspace add creates another.');
+    for (const name of names) {
+      const w = config.workspaces[name];
+      const projects = projectsIn(config, name);
+      ctx.log(`${name}  ${w ? tilde(w.root) : 'no root'}${w?.context ? `, context ${tilde(w.context)}` : ''}, ${projects.length ? projects.join(', ') : 'no projects'}`);
+    }
+    return 0;
+  },
+
+  async rm(args, ctx) {
+    const p = begin('workspace rm', args, {}, ctx);
+    if (typeof p === 'number') return p;
+    if (!needArgs(p, 1, 'workspace rm', ctx)) return 2;
+    const config = readAgentsConfig(ctx.configDir);
+    const name = p.positionals[0]!.trim();
+    if (!config.workspaces[name]) {
+      ctx.log(`No workspace named ${name}.`);
+      return 1;
+    }
+    const used = projectsIn(config, name);
+    if (used.length) {
+      ctx.log(`Used by ${used.join(', ')}. Move those projects first: vsf agents project edit P --workspace OTHER.`);
+      return 1;
+    }
+    delete config.workspaces[name];
+    save(ctx, config);
+    ctx.log(`Deleted workspace ${name}.`);
     return 0;
   },
 };
@@ -1259,6 +1375,7 @@ const agents: Tool = {
     },
 
     project: (args, ctx) => group('project', projectSubs, args, ctx),
+    workspace: (args, ctx) => group('workspace', workspaceSubs, args, ctx),
 
     homes: homeCommands.homes!,
     link: homeCommands.link!,

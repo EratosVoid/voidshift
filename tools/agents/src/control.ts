@@ -2,14 +2,14 @@ import { spawnSync } from 'node:child_process';
 import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
-import { agentsDir, isCardTrigger, readAgentsConfig, type AgentsConfig, type Tracker as Kind } from './config.ts';
-import { isPaused, listRuns, ours, clearCurrent, liveCurrent, readCurrent, setPaused, writeRun, type Current, type RunEntry } from './state.ts';
+import { agentsDir, isCardTrigger, readAgentsConfig, workspaceOf, workspacesInUse, type AgentsConfig, type Tracker as Kind } from './config.ts';
+import { isPaused, listRuns, ours, clearLock, liveCurrent, liveRuns, readCurrent, setPaused, workspaceLocks, writeRun, type Current, type RunEntry } from './state.ts';
 import { runnerService } from './service.ts';
 import { TRACKERS, trackersFor, type Tracker, type Trackers } from './tracker.ts';
 import type { Card } from './linear.ts';
 import { parseFrom, resolveName, stepNames } from './names.ts';
 import { isStatusLabel } from './workflow.ts';
-import { cancelCard, tick } from './runner.ts';
+import { cancelCard, dispatch, tick } from './runner.ts';
 import type { Check, ToolCommand, ToolContext } from './types.ts';
 
 const HOUR = 3_600_000;
@@ -87,11 +87,11 @@ export function countRounds(steps: { result?: string }[]): number {
   return rounds;
 }
 
-// A run that says 'running' but is not the live card was cut off.
-export const isInterrupted = (e: RunEntry, live: Current | null): boolean =>
-  e.record?.outcome === 'running' && !(live && (live.runDir ? live.runDir === e.dir : live.card === e.card));
+// A run that says 'running' but is none of the live runs was cut off.
+export const isInterrupted = (e: RunEntry, live: Current[]): boolean =>
+  e.record?.outcome === 'running' && !live.some((l) => (l.runDir ? l.runDir === e.dir : l.card === e.card));
 
-export function formatRunLine(e: RunEntry, now = Date.now(), live: Current | null = null): string {
+export function formatRunLine(e: RunEntry, now = Date.now(), live: Current[] = []): string {
   const r = e.record;
   if (!r) return `${e.card}  ${when(stampDate(e.stamp))}  older run, logs only (${plural(e.logs.length, 'log')})`;
   const rounds = countRounds(r.steps);
@@ -130,14 +130,14 @@ const readLog = (configDir: string) => {
 };
 
 const USAGE: Record<string, string> = {
-  status: 'status [--json]   Runner, current card, parked cards and workflows',
+  status: 'status [--json]   Runner, the card each workspace is on, parked cards and workflows',
   start: 'start   Start the background runner',
-  stop: 'stop   Stop the runner and cancel the card it is working on',
+  stop: 'stop   Stop the runner and cancel the cards it is working on',
   restart: 'restart   Stop and start the runner',
   pause: 'pause   Pick up no new cards; a card in progress carries on',
   resume: 'resume   Pick up new cards again',
   run: 'run [CARD] [--workflow W] [--from STEP]   Run now instead of waiting for the next minute',
-  cancel: 'cancel [CARD]   Stop the card being worked on and clear its labels',
+  cancel: 'cancel [CARD]   Stop a card being worked on and clear its labels',
   retry: 'retry CARD [--workflow W]   Queue a parked or cancelled card again',
   runs: 'runs [CARD] [--limit N] [--json]   Past runs, newest first',
   show: 'show CARD [--json]   Steps, outcome and labels of the latest run',
@@ -231,7 +231,7 @@ export async function cancelCurrent(ctx: ToolContext, c: Current, deps: CancelDe
     await deps.cancelCard(c.card, first?.label ?? "the workflow's label", c.source ?? 'linear');
     ctx.log(`Cleared a stale lock and cancelled ${c.card}.`);
   } else ctx.log('Cleared a stale lock.');
-  clearCurrent(ctx.configDir);
+  clearLock(ctx.configDir, c);
 }
 
 const realDeps = (ctx: ToolContext): CancelDeps => ({
@@ -281,7 +281,8 @@ async function startCmd(ctx: ToolContext): Promise<number> {
 
 async function stopCmd(ctx: ToolContext): Promise<number> {
   runnerService().stop(ctx.home);
-  // Stopping the runner may have stopped the pass; finish or tidy up whatever the lock still names.
+  // Stopping the runner may have stopped its runs; finish or tidy up whatever the locks still name.
+  for (const c of workspaceLocks(ctx.configDir)) await cancelCurrent(ctx, c, realDeps(ctx));
   const c = readCurrent(ctx.configDir);
   if (c) await cancelCurrent(ctx, c, realDeps(ctx));
   ctx.log('Runner stopped.');
@@ -295,6 +296,14 @@ export function workingLine(current: (Current & { elapsedMinutes: number }) | nu
   return ` Working on ${current.card}${current.title ? ` "${current.title}"` : ''} (${[current.workflow, current.step, current.round ? `round ${current.round}` : '', `${current.elapsedMinutes}m`].filter(Boolean).join(', ')}).`;
 }
 
+const elapsed = (c: Current) => (c.startedAt ? Math.max(0, Math.round((Date.now() - Date.parse(c.startedAt)) / 60_000)) : 0);
+
+// One line per workspace: the card it is on, or idle.
+export function workspaceLines(workspaces: string[], running: (Current & { elapsedMinutes: number })[]): string[] {
+  const names = [...new Set([...workspaces, ...running.map((r) => workspaceOf(r))])];
+  return names.map((ws) => `  ${ws}:${workingLine(running.find((r) => workspaceOf(r) === ws) ?? null) || ' idle.'}`);
+}
+
 const status = guard(async (args, ctx) => {
   const p = parse('status', args, { json: { type: 'boolean' } }, ctx);
   if (typeof p === 'number') return p;
@@ -302,8 +311,11 @@ const status = guard(async (args, ctx) => {
   const runner = runnerState(ctx);
   const text = readLog(ctx.configDir);
   const lastTick = lastTickOf(text);
-  const live = liveCurrent(ctx.configDir);
-  const current = live ? { ...live, checking: !live.card, elapsedMinutes: live.startedAt ? Math.max(0, Math.round((Date.now() - Date.parse(live.startedAt)) / 60_000)) : 0 } : null;
+  const live = liveRuns(ctx.configDir);
+  const running = live.map((c) => ({ ...c, workspace: workspaceOf(c), elapsedMinutes: elapsed(c) }));
+  const dispatcher = liveCurrent(ctx.configDir);
+  // The first run, or the dispatcher checking for work, for dashboards that know one run only.
+  const current = running.length ? { ...running[0]!, checking: false } : dispatcher ? { ...dispatcher, checking: true, elapsedMinutes: elapsed(dispatcher) } : null;
   const seen = new Set<string>();
   const parked: { card: string; reason?: string }[] = [];
   const interrupted: string[] = [];
@@ -316,13 +328,17 @@ const status = guard(async (args, ctx) => {
   const workflows = Object.keys(config.workflows).length;
   const projects = Object.keys(config.projects).length;
   if (p.values.json) {
-    ctx.log(JSON.stringify({ engine: config.engine, runner, lastTick, current, parked, interrupted, workflows, projects }, null, 2));
+    ctx.log(JSON.stringify({ engine: config.engine, runner, lastTick, current, running, parked, interrupted, workflows, projects }, null, 2));
     return 0;
   }
-  const working = workingLine(current);
+  // One workspace keeps the single line; several get a line each.
+  const workspaces = workspacesInUse(config);
+  const perWorkspace = runner !== 'stopped' && (workspaces.length > 1 || running.some((r) => !workspaces.includes(r.workspace)));
+  const working = perWorkspace ? '' : workingLine(current);
   if (runner === 'running') ctx.log(`Runner: running.${working}`);
   else if (runner === 'paused') ctx.log(`Runner: paused, picks up no new cards. vsf agents resume to continue.${working}`);
   else ctx.log('Runner: stopped. vsf agents start to begin.');
+  if (perWorkspace) for (const line of workspaceLines(workspaces, running)) ctx.log(line);
   if (lastTick) ctx.log(`Last check: ${clock(new Date(lastTick.at))}, ${lastTick.line.replace(/\.$/, '') || 'no details'}.`);
   for (const card of interrupted) ctx.log(`Interrupted: ${card}. vsf agents retry ${card} to run it again.`);
   for (const k of parked) ctx.log(`Parked: ${k.card}${k.reason ? ` (${k.reason.replace(/\.$/, '')})` : ''}. vsf agents retry ${k.card} after fixing the cause.`);
@@ -401,21 +417,29 @@ const run = guard(async (args, ctx) => {
   return code;
 });
 
+// The lock a cancel ends, or why there is none. Every run's lock counts, stale
+// ones included, so a dead run can be tidied up; with none, the dispatcher's
+// own lock, a check in progress. Without a card it must be the only one.
+export function pickCancel(locks: Current[], dispatcher: Current | null, card?: string): Current | string {
+  const all = locks.length ? locks : dispatcher ? [dispatcher] : [];
+  if (!all.length) return card ? `${card} is not running.` : 'Nothing is running.';
+  const name = (l: Current) => `${l.card ?? 'a check'}${l.workspace ? ` in ${l.workspace}` : ''}`;
+  if (card) return all.find((l) => l.card === card) ?? `${card} is not running. Running: ${all.map(name).join(', ')}.`;
+  if (all.length > 1) return `More than one card is running: ${all.map(name).join(', ')}. Name one: vsf agents cancel CARD.`;
+  return all[0]!;
+}
+
 const cancel = guard(async (args, ctx) => {
   const p = parse('cancel', args, {}, ctx);
   if (typeof p === 'number') return p;
   const card = p.positionals[0]?.toUpperCase();
   if (p.positionals.length > 1 || (card && !CARD_ID.test(card))) return usageError('cancel', ctx, 'Give one card id like ENG-12.');
-  const c = readCurrent(ctx.configDir);
-  if (!c) {
-    ctx.log(card ? `${card} is not running.` : 'Nothing is running.');
-    return card ? 1 : 0;
+  const found = pickCancel(workspaceLocks(ctx.configDir), readCurrent(ctx.configDir), card);
+  if (typeof found === 'string') {
+    ctx.log(found);
+    return found.startsWith('More than one') ? 2 : card ? 1 : 0;
   }
-  if (card && c.card !== card) {
-    ctx.log(`${c.card ?? 'Another card'} is running, not ${card}.`);
-    return 1;
-  }
-  await cancelCurrent(ctx, c, realDeps(ctx));
+  await cancelCurrent(ctx, found, realDeps(ctx));
   return 0;
 });
 
@@ -424,7 +448,7 @@ const retry = guard(async (args, ctx) => {
   if (typeof p === 'number') return p;
   const id = p.positionals[0]?.toUpperCase();
   if (p.positionals.length !== 1 || !CARD_ID.test(id!)) return usageError('retry', ctx, 'Give one card id like ENG-12.');
-  if (liveCurrent(ctx.configDir)?.card === id) {
+  if (liveRuns(ctx.configDir).some((c) => c.card === id)) {
     ctx.log(`${id} is running now. vsf agents cancel ${id} first.`);
     return 1;
   }
@@ -490,7 +514,7 @@ const runs = guard(async (args, ctx) => {
     return 0;
   }
   if (!entries.length) ctx.log('No runs yet.');
-  const live = liveCurrent(ctx.configDir);
+  const live = liveRuns(ctx.configDir);
   for (const e of entries) ctx.log(formatRunLine(e, Date.now(), live));
   return 0;
 });
@@ -522,7 +546,7 @@ const show = guard(async (args, ctx) => {
     return 0;
   }
   ctx.log(`${latest.card}  ${latest.title}`);
-  ctx.log(`Workflow ${latest.workflow}, ${isInterrupted(all[0]!, liveCurrent(ctx.configDir)) ? 'interrupted' : latest.outcome}${latest.prUrl ? `, PR ${latest.prUrl}` : ''}`);
+  ctx.log(`Workflow ${latest.workflow}, ${isInterrupted(all[0]!, liveRuns(ctx.configDir)) ? 'interrupted' : latest.outcome}${latest.prUrl ? `, PR ${latest.prUrl}` : ''}`);
   if (labels) ctx.log(`Labels: ${labels.join(', ') || 'none'}`);
   for (const s of latest.steps) {
     const took = s.endedAt ? formatDuration(Date.parse(s.endedAt) - Date.parse(s.startedAt)) : 'running';
@@ -629,10 +653,10 @@ const clean = guard(async (args, ctx) => {
   const ms = parseAge(age);
   if (ms === null) return usageError('clean', ctx, `${age} is not an age. Use a number of days or hours, like 14d or 36h.`);
   const cutoff = Date.now() - ms;
-  const live = liveCurrent(ctx.configDir);
+  const live = new Set(liveRuns(ctx.configDir).map((c) => c.card));
   const wtRoot = join(agentsDir(ctx.configDir), 'worktrees');
   const worktrees = (existsSync(wtRoot) ? readdirSync(wtRoot) : [])
-    .filter((card) => card !== live?.card)
+    .filter((card) => !live.has(card))
     .filter((card) => {
       const record = listRuns(ctx.configDir, card)[0]?.record;
       const ended = record?.endedAt ? Date.parse(record.endedAt) : mtime(join(wtRoot, card));
@@ -640,7 +664,7 @@ const clean = guard(async (args, ctx) => {
     })
     .map((card) => join(wtRoot, card));
   const old = listRuns(ctx.configDir).filter((e) => {
-    if (e.record?.outcome === 'running' && e.card === live?.card) return false;
+    if (e.record?.outcome === 'running' && live.has(e.card)) return false;
     return (e.record?.endedAt ? Date.parse(e.record.endedAt) : mtime(e.dir)) < cutoff;
   });
   if (!worktrees.length && !old.length) {
@@ -668,12 +692,16 @@ const clean = guard(async (args, ctx) => {
   return 0;
 });
 
-// Internal: the runner (launchd or systemd) runs this every minute.
-const tickCmd: ToolCommand = async (_args, ctx) => {
+// Internal: the runner (launchd or systemd) runs this every minute, and it
+// starts itself with --card or --schedule for each run, one per workspace.
+const tickCmd: ToolCommand = async (args, ctx) => {
   const stamped = (l: string) => ctx.log(`${new Date().toISOString()} ${l}`);
   try {
+    const { values } = parseArgs({ args, options: { card: { type: 'string' }, workflow: { type: 'string' }, schedule: { type: 'string' } }, strict: true });
     const config = readAgentsConfig(ctx.configDir);
-    return await tick({ configDir: ctx.configDir, config, trackers: trackersFor(ctx.configDir), log: stamped, selfCommand: ctx.selfCommand });
+    const rc = { configDir: ctx.configDir, config, trackers: trackersFor(ctx.configDir), log: stamped, selfCommand: ctx.selfCommand };
+    if (values.card || values.workflow) return await tick(rc, values.card?.toUpperCase(), { workflow: values.workflow, schedule: values.schedule, child: true });
+    return await dispatch(rc, { reload: () => readAgentsConfig(ctx.configDir) });
   } catch (err) {
     stamped(`Could not run the check: ${(err as Error).message}`);
     return 1;
@@ -720,8 +748,8 @@ export async function controlChecks(ctx: ToolContext): Promise<Check[]> {
         : { name: 'runner program', status: 'ok', detail: 'found' },
     );
   }
-  const c = readCurrent(ctx.configDir);
-  if (c && !ours(c.pid)) checks.push({ name: 'stale lock', status: 'warn', detail: 'a stale lock from a run that died', fix: 'vsf agents cancel' });
+  const locks = [readCurrent(ctx.configDir), ...workspaceLocks(ctx.configDir)];
+  if (locks.some((c) => c && !ours(c.pid))) checks.push({ name: 'stale lock', status: 'warn', detail: 'a stale lock from a run that died', fix: 'vsf agents cancel' });
   if (existsSync(logPath(ctx.configDir))) {
     const { count, last } = scanRunnerErrors(readLog(ctx.configDir), Date.now());
     checks.push(
