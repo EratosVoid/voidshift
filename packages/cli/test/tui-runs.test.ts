@@ -11,7 +11,7 @@ import { CardView, appendChunk, viewRuns, logFor, scrollBy, visibleRows, wrapLin
 import { nextTab } from '../src/tui/screens/agents.ts';
 import { theme } from '../src/tui/theme.ts';
 import type { AgentsStatus, RunItem, StepRecord } from '../src/tui/data.ts';
-import { fakeData, newSpy, withFakes } from './tui-helpers.ts';
+import { fakeData, frameUntil, newSpy, withFakes } from './tui-helpers.ts';
 
 const step = (id: string, label: string, over: Partial<StepRecord> = {}): StepRecord => ({ step: id, label, startedAt: '2026-10-20T13:51:00.000Z', endedAt: '2026-10-20T14:00:00.000Z', result: 'done', summary: 'All good.', log: `${id}.log`, ...over });
 
@@ -196,8 +196,7 @@ test('Runs renders the table, the detail and the labels', async () => {
   const data = fakeData({ runs: [r, run('ENG-1399')], agents: agents('ENG-1412'), workflows: [{ name: 'tether-relay-build', triggers: [], steps: ['vs-dev', 'vs-qa'], maxRounds: 3, project: 'p' }] });
   const ui = render(withFakes(spy, data, React.createElement(Runs, { params: {} }), { columns: 110, rows: 40 }));
   // The labels arrive after a debounce, later on a slow machine.
-  for (let i = 0; i < 40 && !/labels vs-working/.test(ui.lastFrame() ?? ''); i++) await tick(50);
-  const f = ui.lastFrame() ?? '';
+  const f = await frameUntil(ui, (frame) => /labels vs-working/.test(frame), 10_000);
   assert.match(f, /Runs, newest first/);
   assert.match(f, /ENG-1412/);
   assert.match(f, /tether-relay-build/);

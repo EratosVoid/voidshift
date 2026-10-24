@@ -11,7 +11,7 @@ import { startedText } from '../src/tui/screens/runs.ts';
 import { wrapLines, bottomTop, visibleRows } from '../src/tui/screens/log.ts';
 import { projectColumns, projectRows } from '../src/tui/screens/projects.ts';
 import { fitColumn, layoutFooter, Table } from '../src/tui/widgets.ts';
-import { fakeData, newSpy, withFakes } from './tui-helpers.ts';
+import { fakeData, frameUntil, newSpy, withFakes } from './tui-helpers.ts';
 
 const wait = (ms = 60) => new Promise((r) => setTimeout(r, ms));
 
@@ -105,19 +105,16 @@ const openAgents = async () => {
   const data = fakeData({ ...emptyState(['agents']), loaded: true, checks: [] });
   const r = render(React.createElement(DataContext.Provider, { value: data }, React.createElement(Shell)));
   r.stdin.write('\r');
-  await wait();
-  assert.match(r.lastFrame()!, /Agents › Runs/);
+  await frameUntil(r, (f) => /Agents › Runs/.test(f), 10_000);
   return r;
 };
 
 test('two right arrows in one write move two tabs', async () => {
   const r = await openAgents();
   r.stdin.write('\u001b[C\u001b[C');
-  await wait(100);
-  assert.match(r.lastFrame()!, /Agents › Projects/);
+  await frameUntil(r, (f) => /Agents › Projects/.test(f), 10_000);
   r.stdin.write('\u001b[D\u001b[D');
-  await wait(100);
-  assert.match(r.lastFrame()!, /Agents › Runs/);
+  await frameUntil(r, (f) => /Agents › Runs/.test(f), 10_000);
   r.unmount();
 });
 
@@ -125,8 +122,7 @@ test('two enters in one write are both handled', async () => {
   const data = fakeData({ ...emptyState(['agents']), loaded: true, checks: [] });
   const r = render(React.createElement(DataContext.Provider, { value: data }, React.createElement(Shell)));
   r.stdin.write('\r\r');
-  await wait(100);
-  assert.match(r.lastFrame()!, /Agents › Runs/);
+  await frameUntil(r, (f) => /Agents › Runs/.test(f), 10_000);
   r.unmount();
 });
 
@@ -136,8 +132,7 @@ test('typing into the palette still arrives as one chunk', async () => {
   r.stdin.write(':');
   await wait();
   r.stdin.write('doctor');
-  await wait(100);
-  assert.match(r.lastFrame()!, /doctor \[--json\]/);
+  await frameUntil(r, (f) => /doctor \[--json\]/.test(f), 10_000);
   r.unmount();
 });
 
