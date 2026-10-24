@@ -1,5 +1,6 @@
 // The Home screen: one live overview of every added tool. Tab moves between
-// sections, Enter opens the focused one. The functions at the top are pure
+// sections, Enter opens the focused one. The Agents section switches between
+// cards and scheduled jobs, and Enter on either opens its card view. The functions at the top are pure
 // shaping of the store's data into lines (tested); the component below draws them.
 import React, { useEffect, useState } from 'react';
 import { Box, Text } from 'ink';
@@ -7,7 +8,8 @@ import { liveRunsOf, useData, runsThisWeek, updateNotice, type AgentsCurrent, ty
 import { useHints, useKeys, useScreen, type Hint } from './context.ts';
 import { clock, clockOrStamp, duration, minutesText, plural, secondsToNextCheck, tilde, truncate } from './format.ts';
 import { theme } from './theme.ts';
-import { Lines, Panel, ProgressSteps, seg, SplitRow, type Line, type StepProgress } from './widgets.ts';
+import { Lines, Panel, ProgressSteps, seg, SplitRow, SubTabs, outcomeColour, type Line, type StepProgress } from './widgets.ts';
+import { listRuns, outcomeOf, startedText } from './screens/runs.ts';
 import type { Check } from '../tool.ts';
 import type { Screen } from './screens.ts';
 
@@ -177,26 +179,60 @@ export function jobRows(agents: AgentsStatus): JobRow[] {
   });
 }
 
+export interface RecentRow {
+  card: string;
+  outcome: string;
+  text: string;
+}
+
+// The latest run of each card that is neither live nor waiting on a retry.
+export function recentRows(state: Pick<DataState, 'agents' | 'runs'>, skip: Set<string>): RecentRow[] {
+  return listRuns(state.runs, null)
+    .filter((r) => !skip.has(r.card))
+    .map((r) => ({ card: r.card, outcome: outcomeOf(r, state), text: `${startedText(r)}  ${truncate(r.record?.title ?? '', 70)}` }));
+}
+
 // How many rows Home shows of each list; the rest are one "+N more" line away.
-export const HOME_LIMITS = { attention: 4, jobs: 3 };
+export const HOME_LIMITS = { attention: 4, recent: 5, jobs: 6 };
 
 export interface HomeLists {
   parked: ParkedRow[];
+  recent: RecentRow[];
   jobs: JobRow[];
   moreParked: number;
   moreJobs: number;
 }
 
-// The parked and failed cards and the jobs Home shows, capped, and how many are left out.
-export function homeLists(agents: AgentsStatus | null | undefined): HomeLists {
+// The cards and the jobs Home shows, capped, and how many are left out. Cards
+// waiting on a retry come first, then the latest runs of the rest.
+export function homeLists(agents: AgentsStatus | null | undefined, runs: RunItem[] = [], live: string[] = []): HomeLists {
   const parked = agents ? parkedRows(agents) : [];
   const jobs = agents ? jobRows(agents) : [];
+  const recent = agents ? recentRows({ agents, runs }, new Set([...live, ...parked.map((p) => p.card)])) : [];
   return {
     parked: parked.slice(0, HOME_LIMITS.attention),
+    recent: recent.slice(0, HOME_LIMITS.recent),
     jobs: jobs.slice(0, HOME_LIMITS.jobs),
     moreParked: Math.max(0, parked.length - HOME_LIMITS.attention),
     moreJobs: Math.max(0, jobs.length - HOME_LIMITS.jobs),
   };
+}
+
+// What the Agents section lists: cards, or scheduled jobs.
+export type AgentsView = 'cards' | 'jobs';
+
+// One selectable row of the Agents section. "all" opens the full Runs list.
+export type AgentItem = { kind: 'live' | 'parked' | 'recent'; card: string } | { kind: 'job'; job: string } | { kind: 'all' };
+
+// The rows Up and Down move through, in the order they are drawn.
+export function agentItems(view: AgentsView, live: string[], lists: HomeLists): AgentItem[] {
+  if (view === 'jobs') return lists.jobs.map((j) => ({ kind: 'job' as const, job: j.workflow }));
+  return [
+    ...live.map((card) => ({ kind: 'live' as const, card })),
+    ...lists.parked.map((p) => ({ kind: 'parked' as const, card: p.card })),
+    ...lists.recent.map((r) => ({ kind: 'recent' as const, card: r.card })),
+    { kind: 'all' as const },
+  ];
 }
 
 export function countsLine(agents: AgentsStatus, runs: RunItem[], nowMs: number): string {
@@ -283,6 +319,7 @@ export function homeHints(opts: { runner?: AgentsStatus['runner']; hasAwake: boo
     { key: 'tab', label: 'section' },
     { key: 'enter', label: 'open' },
   ];
+  if (opts.runner) hints.push({ key: '←→', label: 'cards/jobs' });
   if (opts.runner) hints.push({ key: 'p', label: opts.runner === 'paused' ? 'resume runner' : 'pause runner' });
   if (opts.hasAwake) hints.push({ key: 'a', label: 'awake' });
   hints.push({ key: ':', label: 'command' }, { key: '?', label: 'keys' }, { key: 'q', label: 'quit' });
@@ -305,7 +342,8 @@ export function Home(): React.ReactElement {
   const { state, refreshChecks } = useData();
   const sections = sectionsFor(state.tools);
   const [focus, setFocus] = useState<SectionId>('agents');
-  const [parkedIdx, setParkedIdx] = useState(0);
+  const [view, setView] = useState<AgentsView>('cards');
+  const [selIdx, setSelIdx] = useState(0);
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 1000);
@@ -314,11 +352,10 @@ export function Home(): React.ReactElement {
 
   const at = clampFocus(sections, focus);
   const agents = state.agents;
-  const { parked, jobs } = homeLists(agents);
-  // Parked rows first, then job lines, in one selectable list.
-  const total = parked.length + jobs.length;
-  const sel = Math.min(parkedIdx, Math.max(0, total - 1));
-  const selJob = sel >= parked.length ? jobs[sel - parked.length] : undefined;
+  const live = liveCards(state, now).map((c) => c.card);
+  const items = agentItems(view, live, homeLists(agents, state.runs, live));
+  const sel = Math.min(selIdx, Math.max(0, items.length - 1));
+  const item = at === 'agents' ? items[sel] : undefined;
   const update = updateNotice(state.update);
 
   useHints(homeHints({ runner: agents?.runner, hasAwake: !!state.awake }));
@@ -326,10 +363,14 @@ export function Home(): React.ReactElement {
   useKeys((input, key) => {
     if (key.tab) setFocus(nextSection(sections, at, key.shift ? -1 : 1));
     else if (key.return) {
-      const card = at === 'agents' && !selJob ? parked[sel]?.card : undefined;
-      ctx.nav.push(SCREEN_OF[at], at === 'agents' ? { tab: 'agents.runs', ...(card ? { card } : {}), ...(selJob ? { job: selJob.workflow } : {}) } : {});
-    } else if (at === 'agents' && key.upArrow) setParkedIdx(Math.max(0, sel - 1));
-    else if (at === 'agents' && key.downArrow) setParkedIdx(Math.min(total - 1, sel + 1));
+      if (item?.kind === 'job') ctx.nav.push('agents.card', { job: item.job });
+      else if (item && item.kind !== 'all') ctx.nav.push('agents.card', { card: item.card });
+      else ctx.nav.push(SCREEN_OF[at], at === 'agents' ? { tab: 'agents.runs' } : {});
+    } else if (at === 'agents' && (key.leftArrow || key.rightArrow) && agents) {
+      setView(view === 'cards' ? 'jobs' : 'cards');
+      setSelIdx(0);
+    } else if (at === 'agents' && key.upArrow) setSelIdx(Math.max(0, sel - 1));
+    else if (at === 'agents' && key.downArrow) setSelIdx(Math.min(items.length - 1, sel + 1));
     else if (input === 'p' && agents) {
       if (agents.runner === 'stopped') ctx.toast('The runner is stopped. Start it with: vsf agents start', 'info');
       else
@@ -350,8 +391,8 @@ export function Home(): React.ReactElement {
           cancelLabel: 'Cancel',
           done: 'Awake is on',
         });
-    } else if (input === 'r' && !selJob && parked[sel]) {
-      const card = parked[sel]!.card;
+    } else if (input === 'r' && item?.kind === 'parked') {
+      const card = item.card;
       void ctx.actions.run({
         args: ['agents', 'retry', card],
         title: `Retry ${card}?`,
@@ -375,7 +416,7 @@ export function Home(): React.ReactElement {
 
   const panels: React.ReactNode[] = [];
   // The Agents panel takes the height left over and clips; the rest keep theirs.
-  if (sections.includes('agents')) panels.push(h(AgentsPanel, { key: 'agents', focused: at === 'agents', selected: sel, now }));
+  if (sections.includes('agents')) panels.push(h(AgentsPanel, { key: 'agents', focused: at === 'agents', view, selected: sel, now }));
   const lower: React.ReactNode[] = [];
   // Whole-number widths: halves of an odd width would misalign the borders.
   const count = ['awake', 'memory'].filter((t) => state.tools.includes(t)).length;
@@ -410,7 +451,7 @@ export function Home(): React.ReactElement {
 
 const toolState = (error: string | undefined) => h(Text, { color: error ? theme.yellow : theme.dim, wrap: 'truncate-end' }, error ?? 'Loading...');
 
-function AgentsPanel(props: { focused: boolean; selected: number; now: number }): React.ReactElement {
+function AgentsPanel(props: { focused: boolean; view: AgentsView; selected: number; now: number }): React.ReactElement {
   const { state } = useData();
   const agents = state.agents;
   if (!agents) return h(Panel, { title: 'Agents', focused: props.focused }, toolState(state.errors.agents));
@@ -418,66 +459,104 @@ function AgentsPanel(props: { focused: boolean; selected: number; now: number })
 
   const run = runnerLines(agents, props.now);
   const lives = liveCards(state, props.now);
-  const { parked, jobs, moreParked, moreJobs } = homeLists(agents);
+  const lists = homeLists(agents, state.runs, lives.map((l) => l.card));
+  const { parked, recent, jobs, moreParked, moreJobs } = lists;
+  const isOn = (i: number) => props.focused && i === props.selected;
+  const opens = (on: boolean, text = 'enter opens'): Line => (on ? [seg(text, theme.dim)] : []);
   const rows: React.ReactNode[] = [h(SplitRow, { key: 'runner', left: run.left, right: run.right })];
 
-  for (const live of lives) {
-    rows.push(h(Text, { key: `g1${live.card}` }, ' '));
-    rows.push(
-      h(SplitRow, {
-        key: `live${live.card}`,
-        left: [seg('▶ ', theme.accent), seg(live.card, theme.accent, { bold: true }), seg(`  ${truncate(live.title, 60)}`)],
-        right: [seg(live.workspace && live.workspace !== 'default' ? `${live.workspace} · ${live.workflow}` : live.workflow, theme.dim)],
+  rows.push(h(Text, { key: 'g0' }, ' '));
+  rows.push(
+    h(
+      Box,
+      { key: 'switch', flexDirection: 'row', justifyContent: 'space-between', marginLeft: -1 },
+      h(SubTabs, {
+        tabs: [
+          { id: 'cards', label: `Cards ${lives.length + parked.length + moreParked + recent.length}` },
+          { id: 'jobs', label: `Jobs ${jobs.length + moreJobs}` },
+        ],
+        active: props.view,
       }),
-    );
-    rows.push(
-      h(
-        Box,
-        { key: `steps${live.card}`, flexDirection: 'row' },
-        h(Text, null, '  '),
-        h(ProgressSteps, { steps: live.steps }),
-        h(
-          Text,
-          { color: theme.dim },
-          `       running ${duration(live.minutes * 60_000)}${live.maxRounds ? ` · round ${live.round} of ${live.maxRounds}` : ` · round ${live.round}`}`,
-        ),
-      ),
-    );
-  }
-  if (!lives.length && agents.current) {
-    rows.push(h(Text, { key: 'g1' }, ' '));
-    rows.push(h(Text, { key: 'checking', color: theme.dim }, '  Checking Linear now.'));
-  }
+      props.focused ? h(Text, { color: theme.dim }, '←→ switch') : null,
+    ),
+  );
 
-  if (parked.length) {
-    rows.push(h(Text, { key: 'g2' }, ' '));
-    parked.forEach((p, i) => {
-      const on = props.focused && i === props.selected;
+  if (props.view === 'cards') {
+    let i = 0;
+    for (const live of lives) {
+      const on = isOn(i++);
+      rows.push(h(Text, { key: `g1${live.card}` }, ' '));
       rows.push(
         h(SplitRow, {
-          key: `p${p.card}`,
-          left: [seg(p.kind === 'interrupted' ? '○ ' : '! ', p.kind === 'parked' ? theme.yellow : p.kind === 'failed' ? theme.red : theme.dim), seg(p.card, p.kind === 'parked' ? theme.yellow : p.kind === 'failed' ? theme.red : theme.dim, { bold: on }), seg(`  ${p.text}`)],
-          right: on || (parked.length === 1 && !jobs.length) ? [seg('r retry · enter details', theme.dim)] : [],
+          key: `live${live.card}`,
+          left: [seg('▶ ', theme.accent), seg(live.card, theme.accent, { bold: true, bg: on ? theme.selected : undefined }), seg(`  ${truncate(live.title, 60)}`)],
+          right: [...(on ? [seg('enter opens · ', theme.dim)] : []), seg(live.workspace && live.workspace !== 'default' ? `${live.workspace} · ${live.workflow}` : live.workflow, theme.dim)],
         }),
       );
-    });
-    if (moreParked) rows.push(h(Text, { key: 'moreParked', color: theme.dim }, `  +${moreParked} more · enter opens Runs`));
-  }
-  if (jobs.length) {
+      rows.push(
+        h(
+          Box,
+          { key: `steps${live.card}`, flexDirection: 'row' },
+          h(Text, null, '  '),
+          h(ProgressSteps, { steps: live.steps }),
+          h(
+            Text,
+            { color: theme.dim },
+            `       running ${duration(live.minutes * 60_000)}${live.maxRounds ? ` · round ${live.round} of ${live.maxRounds}` : ` · round ${live.round}`}`,
+          ),
+        ),
+      );
+    }
+    if (!lives.length && agents.current) {
+      rows.push(h(Text, { key: 'g1' }, ' '));
+      rows.push(h(Text, { key: 'checking', color: theme.dim }, '  Checking Linear now.'));
+    }
+
+    if (parked.length) {
+      rows.push(h(Text, { key: 'g2' }, ' '));
+      parked.forEach((p) => {
+        const on = isOn(i++);
+        const colour = p.kind === 'parked' ? theme.yellow : p.kind === 'failed' ? theme.red : theme.dim;
+        rows.push(
+          h(SplitRow, {
+            key: `p${p.card}`,
+            left: [seg(p.kind === 'interrupted' ? '○ ' : '! ', colour), seg(p.card, colour, { bold: on, bg: on ? theme.selected : undefined }), seg(`  ${p.text}`)],
+            right: opens(on, 'r retry · enter opens'),
+          }),
+        );
+      });
+      if (moreParked) rows.push(h(Text, { key: 'moreParked', color: theme.dim }, `  +${moreParked} more · All runs lists them`));
+    }
+
+    if (recent.length) {
+      rows.push(h(Text, { key: 'g3r' }, ' '));
+      const width = Math.max(...recent.map((r) => r.card.length));
+      recent.forEach((r) => {
+        const on = isOn(i++);
+        rows.push(
+          h(SplitRow, {
+            key: `r${r.card}`,
+            left: [seg('  '), seg(r.card.padEnd(width), undefined, { bold: on, bg: on ? theme.selected : undefined }), seg(`  ${r.outcome.padEnd(9)}`, outcomeColour(r.outcome)), seg(` ${r.text}`, theme.dim)],
+            right: opens(on),
+          }),
+        );
+      });
+    }
+
+    const onAll = isOn(i);
+    rows.push(h(Text, { key: 'g3a' }, ' '));
+    rows.push(h(SplitRow, { key: 'all', left: [seg('  › ', theme.dim), seg('All runs', onAll ? undefined : theme.dim, { bold: onAll, bg: onAll ? theme.selected : undefined })], right: opens(onAll, 'enter opens Runs') }));
+  } else {
     rows.push(h(Text, { key: 'g2j' }, ' '));
+    if (!jobs.length) rows.push(h(Text, { key: 'nojobs', color: theme.dim }, '  No scheduled jobs. A workflow with a cron trigger shows up here.'));
     jobs.forEach((j, i) => {
-      const on = props.focused && parked.length + i === props.selected;
-      rows.push(
-        h(SplitRow, {
-          key: `j${j.workflow}`,
-          left: [seg(j.text, j.bad ? theme.yellow : theme.dim, { bold: on })],
-          right: on ? [seg('enter shows its runs', theme.dim)] : [],
-        }),
-      );
+      const on = isOn(i);
+      rows.push(h(SplitRow, { key: `j${j.workflow}`, left: [seg(j.text, j.bad ? theme.yellow : theme.dim, { bold: on, bg: on ? theme.selected : undefined })], right: opens(on) }));
     });
     if (moreJobs) rows.push(h(Text, { key: 'moreJobs', color: theme.dim }, `  +${moreJobs} more ${moreJobs === 1 ? 'job' : 'jobs'} · vsf agents status lists them`));
   }
-  rows.push(h(Text, { key: 'g3' }, ' '));
+
+  rows.push(h(Text, { key: 'g4' }, ' '));
   rows.push(h(Text, { key: 'counts', color: theme.dim }, countsLine(agents, state.runs, props.now)));
   for (const key of ['agents.runs', 'agents']) {
     if (state.errors[key]) rows.push(h(Text, { key: `e${key}`, color: theme.yellow, wrap: 'truncate-end' }, `! ${state.errors[key]}`));

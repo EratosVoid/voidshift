@@ -7,7 +7,7 @@ import React from 'react';
 import { render } from 'ink-testing-library';
 import '../src/tui/screens.ts';
 import { Runs, cancelSpec, filterRuns, isLive, logStepOf, manualLogPath, listRuns, attemptsOf, outcomeOf, roundsOf, runMs, runsDeps, runsKey, stepMark, stepsLabel, windowStart } from '../src/tui/screens/runs.ts';
-import { LogView, appendChunk, logFor, scrollBy, visibleRows, wrapLines } from '../src/tui/screens/log.ts';
+import { CardView, appendChunk, viewRuns, logFor, scrollBy, visibleRows, wrapLines } from '../src/tui/screens/log.ts';
 import { nextTab } from '../src/tui/screens/agents.ts';
 import { theme } from '../src/tui/theme.ts';
 import type { AgentsStatus, RunItem, StepRecord } from '../src/tui/data.ts';
@@ -211,7 +211,7 @@ test('Runs renders the table, the detail and the labels', async () => {
   ui.unmount();
 });
 
-test('Runs keys: enter opens the log, c asks to cancel, x cleans, / filters', async () => {
+test('Runs keys: enter opens the card, c asks to cancel, x cleans, / filters', async () => {
   const spy = newSpy();
   runsDeps.fetchLabels = async () => null;
   const data = fakeData({ runs: [run('ENG-1412', {}, 'running'), run('ENG-1399')], agents: agents('ENG-1412') });
@@ -219,7 +219,7 @@ test('Runs keys: enter opens the log, c asks to cancel, x cleans, / filters', as
   await tick();
   ui.stdin.write('\r');
   await tick();
-  assert.deepEqual(spy.pushed[0], { id: 'agents.log', params: { card: 'ENG-1412', dir: '/tmp/runs/ENG-1412/a', step: 'vs-qa', stepLabel: 'QA' } });
+  assert.deepEqual(spy.pushed[0], { id: 'agents.card', params: { card: 'ENG-1412', dir: '/tmp/runs/ENG-1412/a', step: 'vs-qa' } });
   ui.stdin.write('c');
   await tick();
   assert.deepEqual((spy.ran[0] as { args: string[] }).args, ['agents', 'cancel', 'ENG-1412']);
@@ -244,13 +244,13 @@ test('Runs keys: enter opens the log, c asks to cancel, x cleans, / filters', as
   ui.unmount();
 });
 
-test('LogView follows a growing file', async () => {
+test('the card view follows a growing file', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'vsf-log-'));
   writeFileSync(join(dir, '02-vs-qa.log'), '$ claude -p\nReading the plan.\n');
   const r = run('ENG-1412', { dir }, 'running');
   const spy = newSpy();
   const data = fakeData({ runs: [r], agents: agents('ENG-1412') });
-  const ui = render(withFakes(spy, data, React.createElement(LogView, { params: { card: 'ENG-1412', dir, step: 'vs-qa' } }), { columns: 100, rows: 24 }));
+  const ui = render(withFakes(spy, data, React.createElement(CardView, { params: { card: 'ENG-1412', dir, step: 'vs-qa' } }), { columns: 100, rows: 24 }));
   await tick(700);
   let f = ui.lastFrame() ?? '';
   assert.match(f, /02-vs-qa\.log/);
@@ -272,4 +272,57 @@ test('a step line shows its tokens and cost, and nothing without usage', async (
   const line = (s: StepRecord) => stepLine(s, Date.parse('2026-10-20T10:06:00.000Z')).map((x) => x.text).join('');
   assert.ok(!line(step).includes('est.'));
   assert.match(line({ ...step, usage: { input: 12_300, output: 4100, costUsd: 0.42, model: 'opus' } }), /12\.3k in, 4\.1k out, \$0\.42 est\.  did it$/);
+});
+
+test('a job opens one view of its runs, moving between them with the arrows', async () => {
+  const cron = (stamp: string, outcome: 'verified' | 'parked'): RunItem => {
+    const r = run(`TETHERQASCOUT-${stamp}`, { dir: `/tmp/runs/scout/${stamp}`, logs: ['01-scout.log'] }, outcome);
+    r.record = { ...r.record!, title: 'Sweep ENG cards', workflow: 'tether-qa-scout', source: 'cron', steps: [step('scout', 'Scout')] };
+    return r;
+  };
+  const runs = [cron('0345', 'verified'), cron('0330', 'parked'), run('ENG-1412')];
+  assert.deepEqual(viewRuns(runs, { job: 'tether-qa-scout' }).map((r) => r.card), ['TETHERQASCOUT-0345', 'TETHERQASCOUT-0330']);
+  assert.deepEqual(viewRuns(runs, { card: 'ENG-1412' }).map((r) => r.card), ['ENG-1412']);
+  assert.deepEqual(viewRuns(runs, { card: 'TETHERQASCOUT-0345' }).map((r) => r.card), ['TETHERQASCOUT-0345']);
+
+  const spy = newSpy();
+  const data = fakeData({ runs, agents: { ...agents('none'), current: null } });
+  const ui = render(withFakes(spy, data, React.createElement(CardView, { params: { job: 'tether-qa-scout' } }), { columns: 110, rows: 30 }));
+  await tick();
+  let f = ui.lastFrame() ?? '';
+  assert.match(f, /TETHERQASCOUT-0345/);
+  assert.match(f, /Run 1 of 2/);
+  assert.match(f, /Sweep ENG cards/);
+  ui.stdin.write('\u001b[C');
+  await tick();
+  f = ui.lastFrame() ?? '';
+  assert.match(f, /TETHERQASCOUT-0330/);
+  assert.match(f, /Run 2 of 2/);
+  ui.stdin.write('r');
+  await tick();
+  ui.stdin.write('f');
+  await tick();
+  assert.equal(spy.ran.length, 0);
+  assert.match(spy.toasts.join('\n'), /not retried/);
+  assert.match(spy.toasts.join('\n'), /on their schedule/);
+  assert.deepEqual(spy.hints?.map((h) => h.key), ['t', '↑↓', '1-9', '←→', 'c', 'esc']);
+  ui.unmount();
+});
+
+test('a card view retries the card and picks a step to run from', async () => {
+  const spy = newSpy();
+  runsDeps.fetchLabels = async () => null;
+  const older = run('ENG-1407', { dir: '/tmp/runs/ENG-1407/old', stamp: '2026-10-19T10-00-00' }, 'parked');
+  const data = fakeData({ runs: [run('ENG-1407', {}, 'parked'), older], agents: { ...agents('none'), current: null }, workflows: [{ name: 'tether-relay-build', triggers: [], steps: ['vs-dev', 'vs-qa'], maxRounds: 3, project: 'p' }] });
+  const ui = render(withFakes(spy, data, React.createElement(CardView, { params: { card: 'ENG-1407' } }), { columns: 110, rows: 30 }));
+  await tick();
+  assert.match(ui.lastFrame() ?? '', /Attempt 2 of 2/);
+  ui.stdin.write('r');
+  await tick();
+  assert.deepEqual((spy.ran[0] as { args: string[] }).args, ['agents', 'retry', 'ENG-1407']);
+  ui.stdin.write('f');
+  await tick();
+  assert.match(ui.lastFrame() ?? '', /Run from:/);
+  assert.deepEqual(spy.hints?.map((h) => h.key), ['←→', 'enter', 'g', 'esc']);
+  ui.unmount();
 });

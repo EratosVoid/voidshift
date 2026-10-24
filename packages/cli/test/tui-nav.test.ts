@@ -6,8 +6,8 @@ import { activeTab, AGENT_TABS, crumbsOf, hintsOf, screens } from '../src/tui/sc
 test('the stack starts at home and pushes screens on top', () => {
   let s = initialStack();
   s = navReducer(s, { type: 'push', id: 'agents', params: { tab: 'agents.runs' } });
-  s = navReducer(s, { type: 'push', id: 'agents.log', params: { card: 'ENG-1' } });
-  assert.deepEqual(s.map((r) => r.id), ['home', 'agents', 'agents.log']);
+  s = navReducer(s, { type: 'push', id: 'agents.card', params: { card: 'ENG-1' } });
+  assert.deepEqual(s.map((r) => r.id), ['home', 'agents', 'agents.card']);
   assert.deepEqual(s[2]!.params, { card: 'ENG-1' });
 });
 
@@ -36,13 +36,13 @@ test('breadcrumb skips home and keeps only the first crumb of lower screens', ()
   const titles = (r: { id: string; params: Record<string, unknown> }) => crumbsOf(r.id, r.params);
   let s = navReducer(initialStack(), { type: 'push', id: 'agents', params: { tab: 'agents.workflows' } });
   assert.deepEqual(breadcrumb(s, titles), ['Agents', 'Workflows']);
-  s = navReducer(s, { type: 'push', id: 'agents.log', params: { card: 'ENG-1412' } });
-  assert.deepEqual(breadcrumb(s, titles), ['Agents', 'ENG-1412', 'Log']);
+  s = navReducer(s, { type: 'push', id: 'agents.card', params: { card: 'ENG-1412' } });
+  assert.deepEqual(breadcrumb(s, titles), ['Agents', 'ENG-1412']);
   assert.deepEqual(breadcrumb(initialStack(), titles), []);
 });
 
 test('every screen id Home and the agents tabs rely on is registered', () => {
-  for (const id of ['home', 'agents', 'agents.runs', 'agents.workflows', 'agents.projects', 'agents.homes', 'settings', 'agents.log', 'agents.workflow.form', 'agents.project.form', 'awake', 'memory', 'checks']) {
+  for (const id of ['home', 'agents', 'agents.runs', 'agents.workflows', 'agents.projects', 'agents.homes', 'settings', 'agents.card', 'agents.workflow.form', 'agents.project.form', 'awake', 'memory', 'checks']) {
     assert.ok(screens[id], id);
   }
   for (const t of AGENT_TABS) assert.ok(screens[t.id], t.id);

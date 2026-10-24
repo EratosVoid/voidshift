@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import React from 'react';
 import { render } from 'ink-testing-library';
-import { awakeLines, checksLines, checksView, clampFocus, countsLine, Home, HOME_LIMITS, homeHints, homeLists, liveCard, liveCards, memoryLines, jobRows, nextSection, parkedRows, runnerLines, sectionsFor } from '../src/tui/home.ts';
+import { awakeLines, checksLines, checksView, clampFocus, countsLine, Home, HOME_LIMITS, agentItems, homeHints, homeLists, recentRows, liveCard, liveCards, memoryLines, jobRows, nextSection, parkedRows, runnerLines, sectionsFor } from '../src/tui/home.ts';
 import { emptyState, runsThisWeek, updateNotice, type AgentsStatus, type DataState, type RunItem } from '../src/tui/data.ts';
 import { barParts, cycle, editText, fitCell } from '../src/tui/widgets.ts';
 import { duration, minutesText, secondsToNextCheck, truncate } from '../src/tui/format.ts';
@@ -212,9 +212,9 @@ test('checks summarise counts and list problems with their fix, failures first',
 
 test('home hints follow the runner state and the tools added', () => {
   const keys = (o: Parameters<typeof homeHints>[0]) => homeHints(o).map((h) => h.key);
-  assert.deepEqual(keys({ runner: 'running', hasAwake: true }), ['tab', 'enter', 'p', 'a', ':', '?', 'q']);
+  assert.deepEqual(keys({ runner: 'running', hasAwake: true }), ['tab', 'enter', '←→', 'p', 'a', ':', '?', 'q']);
   assert.deepEqual(keys({ hasAwake: false }), ['tab', 'enter', ':', '?', 'q']);
-  assert.equal(homeHints({ runner: 'paused', hasAwake: false })[2]!.label, 'resume runner');
+  assert.equal(homeHints({ runner: 'paused', hasAwake: false })[3]!.label, 'resume runner');
 });
 
 test('progress bars, text editing and small formatters', () => {
@@ -251,10 +251,10 @@ test('Home renders the live card, a parked card and the other sections', () => {
   });
   const r = render(withFakes(spy, data, React.createElement(Home)));
   const frame = r.lastFrame()!;
-  for (const want of ['Agents', '● Runner running', '▶ ENG-1412', 'Webhook retries drop the payload', 'Dev ━━━━━━━━━━━━ ✓', 'QA ', 'round 1 of 3', '! ENG-1407', 'parked: checks still failed after 3 rounds', 'r retry · enter details', '1 workflow · 2 projects', 'Awake', 'On since', 'Memory', '214 notes · 3 not in INDEX.md', 'Checks', '✓ 1 ok', '! 1 warning', 'agents missing vs-qa']) {
+  for (const want of ['Agents', '● Runner running', '▶ ENG-1412', 'Webhook retries drop the payload', 'Dev ━━━━━━━━━━━━ ✓', 'QA ', 'round 1 of 3', '! ENG-1407', 'parked: checks still failed after 3 rounds', 'enter opens · tether-relay-build', 'Cards', 'Jobs 0', 'ENG-1300', 'All runs', '1 workflow · 2 projects', 'Awake', 'On since', 'Memory', '214 notes · 3 not in INDEX.md', 'Checks', '✓ 1 ok', '! 1 warning', 'agents missing vs-qa']) {
     assert.ok(frame.includes(want), `missing "${want}" in:\n${frame}`);
   }
-  assert.deepEqual(spy.hints?.map((h) => h.key), ['tab', 'enter', 'p', 'a', ':', '?', 'q']);
+  assert.deepEqual(spy.hints?.map((h) => h.key), ['tab', 'enter', '←→', 'p', 'a', ':', '?', 'q']);
   r.unmount();
 });
 
@@ -278,7 +278,7 @@ test('Home hides sections of tools that are not added', () => {
   assert.ok(!frame.includes('Memory'));
 });
 
-test('keys: enter opens the focused section, r retries, p and a ask the command', async () => {
+test('keys: enter opens the selected card, r retries, p and a ask the command', async () => {
   const spy = newSpy();
   const data = fakeData({ ...base, tools: ['agents', 'awake'], awake: { on: false, sleepDisabledByOther: false, since: null, until: null, minutesLeft: null, batteryFloor: 20, floorApplies: false, power: { onBattery: false, percent: null }, watchdog: true, lastReason: null } });
   const r = render(withFakes(spy, data, React.createElement(Home)));
@@ -287,7 +287,12 @@ test('keys: enter opens the focused section, r retries, p and a ask the command'
     await new Promise((res) => setTimeout(res, 30));
   };
   await press('\r');
-  assert.deepEqual(spy.pushed.at(-1), { id: 'agents', params: { tab: 'agents.runs', card: 'ENG-1407' } });
+  assert.deepEqual(spy.pushed.at(-1), { id: 'agents.card', params: { card: 'ENG-1412' } });
+  await press('r');
+  assert.equal(spy.ran.length, 0, 'r on a live card retries nothing');
+  await press('\u001b[B');
+  await press('\r');
+  assert.deepEqual(spy.pushed.at(-1), { id: 'agents.card', params: { card: 'ENG-1407' } });
   await press('r');
   await press('p');
   await press('a');
@@ -306,14 +311,14 @@ test('Home shows a few parked cards and jobs, and counts the rest', () => {
     ...agents,
     interrupted: [],
     failed: Array.from({ length: 48 }, (_, i) => ({ card: `ENG-${1000 + i}`, reason: 'process died' })),
-    jobs: Array.from({ length: 5 }, (_, i) => ({ ...job, workflow: `job${i}` })),
+    jobs: Array.from({ length: 8 }, (_, i) => ({ ...job, workflow: `job${i}` })),
   };
   const l = homeLists(many);
   assert.equal(l.parked.length, HOME_LIMITS.attention);
   assert.equal(l.moreParked, 49 - HOME_LIMITS.attention);
   assert.equal(l.jobs.length, HOME_LIMITS.jobs);
-  assert.equal(l.moreJobs, 5 - HOME_LIMITS.jobs);
-  assert.deepEqual(homeLists(null), { parked: [], jobs: [], moreParked: 0, moreJobs: 0 });
+  assert.equal(l.moreJobs, 8 - HOME_LIMITS.jobs);
+  assert.deepEqual(homeLists(null), { parked: [], recent: [], jobs: [], moreParked: 0, moreJobs: 0 });
 });
 
 test('a long list never pushes Memory and Checks off a short terminal', () => {
@@ -331,7 +336,43 @@ test('a long list never pushes Memory and Checks off a short terminal', () => {
   const frame = r.lastFrame()!;
   const lines = frame.split('\n');
   assert.ok(lines.length <= 27, `Home is ${lines.length} rows tall:\n${frame}`);
-  for (const want of ['Agents', 'more · enter opens Runs', 'Memory', '331 notes · 1 not in INDEX.md', 'Checks', '✓ 1 ok']) assert.ok(frame.includes(want), `missing "${want}" in:\n${frame}`);
+  for (const want of ['Agents', 'more · All runs lists them', 'Memory', '331 notes · 1 not in INDEX.md', 'Checks', '✓ 1 ok']) assert.ok(frame.includes(want), `missing "${want}" in:\n${frame}`);
   assert.ok(!frame.includes('ENG-1047'), 'the 48th failed card should be left out');
+  r.unmount();
+});
+
+test('recent cards skip live and parked ones, and the switch lists cards or jobs', () => {
+  const rows = recentRows({ agents, runs }, new Set(['ENG-1412']));
+  assert.deepEqual(rows.map((r) => [r.card, r.outcome]), [['ENG-1300', 'verified']]);
+  const job = { workflow: 'scout', schedule: '*/15 * * * *', task: 't', last: { at: iso(10), outcome: 'done' }, lastOkAt: iso(10), today: { runs: 3, failed: 0, handed: 0 } };
+  const lists = homeLists({ ...agents, jobs: [job] }, runs, ['ENG-1412']);
+  assert.deepEqual(agentItems('cards', ['ENG-1412'], lists), [
+    { kind: 'live', card: 'ENG-1412' },
+    { kind: 'parked', card: 'ENG-1407' },
+    { kind: 'parked', card: 'ENG-1399' },
+    { kind: 'recent', card: 'ENG-1300' },
+    { kind: 'all' },
+  ]);
+  assert.deepEqual(agentItems('jobs', ['ENG-1412'], lists), [{ kind: 'job', job: 'scout' }]);
+});
+
+test('right arrow switches Home to jobs, and enter opens the job', async () => {
+  const spy = newSpy();
+  const job = { workflow: 'tether-qa-scout', schedule: '*/15 * * * *', task: 't', last: { at: iso(10), outcome: 'done' }, lastOkAt: iso(10), today: { runs: 16, failed: 0, handed: 0 } };
+  const r = render(withFakes(spy, fakeData({ ...base, agents: { ...agents, jobs: [job] }, checks: [] }), React.createElement(Home)));
+  const press = async (s: string) => {
+    r.stdin.write(s);
+    await new Promise((res) => setTimeout(res, 30));
+  };
+  await press('\u001b[C');
+  const frame = r.lastFrame()!;
+  assert.ok(frame.includes('tether-qa-scout  cron */15 * * * *'), frame);
+  assert.ok(!frame.includes('▶ ENG-1412'), 'live cards belong to the Cards view');
+  await press('\r');
+  assert.deepEqual(spy.pushed.at(-1), { id: 'agents.card', params: { job: 'tether-qa-scout' } });
+  await press('\u001b[D');
+  for (let i = 0; i < 4; i++) await press('\u001b[B');
+  await press('\r');
+  assert.deepEqual(spy.pushed.at(-1), { id: 'agents', params: { tab: 'agents.runs' } });
   r.unmount();
 });

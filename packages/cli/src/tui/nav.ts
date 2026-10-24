@@ -37,8 +37,8 @@ export function navReducer(stack: Route[], action: NavAction): Route[] {
 }
 
 // Breadcrumb for the header. `titles` are each route's crumbs. Screens below
-// the top one give only their first crumb, so [home, agents, agents.log]
-// reads "Agents > ENG-1412 > QA log". Home is not part of the trail.
+// the top one give only their first crumb, so [home, agents, agents.card]
+// reads "Agents > ENG-1412". Home is not part of the trail.
 export function breadcrumb(stack: Route[], titles: (route: Route) => string[]): string[] {
   const rest = stack.filter((r) => r.id !== HOME);
   const out: string[] = [];

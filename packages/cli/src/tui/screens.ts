@@ -7,7 +7,7 @@
 //      A later entry with the same id replaces the placeholder.
 //
 // A SCREEN
-//   id         unique, e.g. "agents.log". Ids below are fixed so Home can open them.
+//   id         unique, e.g. "agents.card". Ids below are fixed so Home can open them.
 //   title      breadcrumb crumb(s) for the header, a string, string[] or a
 //              function of the route params: (p) => ['Workflows', `Edit ${p.name}`].
 //              Screens under the top one contribute only their first crumb.
@@ -52,7 +52,7 @@
 // agents.workflows, agents.projects, agents.homes and settings. Left and right
 // switch tabs. A tab is an ordinary screen; it is rendered inside the shell and
 // receives the shell's params plus (for settings) { tool: 'agents' }. Push
-// "agents.log" { card, step? } for a run's log, "agents.workflow.form" { name? }
+// "agents.card" { card or job, dir?, step? } for a card or job, "agents.workflow.form" { name? }
 // (no name means new) and "agents.project.form" { name? } on top of the shell.
 import React from 'react';
 import { Box, Text, useInput } from 'ink';
@@ -60,7 +60,7 @@ import { ScreenCtx, useScreen, type Hint, type ScreenContext } from './context.t
 import { homeScreen } from './home.ts';
 import { agentsScreen as agentsShellScreen } from './screens/agents.ts';
 import { runsScreen } from './screens/runs.ts';
-import { logScreen } from './screens/log.ts';
+import { cardScreen } from './screens/log.ts';
 import { settingsScreen } from './screens/settings.ts';
 import { awakeScreen } from './screens/awake.ts';
 import { memoryScreen } from './screens/memory.ts';
@@ -184,7 +184,7 @@ const registry: Screen[] = [
   placeholder('agents.projects', 'Projects'),
   placeholder('agents.homes', 'Homes'),
   placeholder('settings', 'Settings'),
-  placeholder('agents.log', 'Log'),
+  placeholder('agents.card', 'Card'),
   placeholder('agents.workflow.form', 'Workflow'),
   placeholder('agents.project.form', 'Project'),
   placeholder('awake', 'Awake'),
@@ -192,7 +192,7 @@ const registry: Screen[] = [
   placeholder('checks', 'Checks'),
   agentsShellScreen,
   runsScreen,
-  logScreen,
+  cardScreen,
   settingsScreen,
   awakeScreen,
   memoryScreen,

@@ -1,5 +1,5 @@
 // The Runs tab of the agents screen: every run newest first, the selected run
-// in detail below, and the keys to open its log, cancel, retry, run from a
+// in detail below, and the keys to open it, cancel, retry, run from a
 // step, clean old runs and filter. Every action is a real vsf command.
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Box, Text, type Key } from 'ink';
@@ -178,7 +178,7 @@ export function cancelSpec(card: string, stepLabel?: string): ActionSpec {
 }
 
 export const RUN_HINTS: Hint[] = [
-  { key: 'enter', label: 'live log' },
+  { key: 'enter', label: 'open' },
   { key: 'c', label: 'cancel' },
   { key: 'r', label: 'retry' },
   { key: 'f', label: 'run from step' },
@@ -212,7 +212,7 @@ export async function fetchLabelsReal(card: string): Promise<string[] | null> {
 // Swapped out in tests.
 export const runsDeps = { fetchLabels: fetchLabelsReal, debounceMs: 500 };
 
-function useLabels(card: string | undefined): string[] | null {
+export function useLabels(card: string | undefined): string[] | null {
   const [labels, setLabels] = useState<string[] | null>(card ? (labelCache.get(card)?.labels ?? null) : null);
   useEffect(() => {
     if (!card || process.env.VSF_TUI_NO_LABELS === '1') {
@@ -358,8 +358,7 @@ export function Runs(props: { params: Record<string, unknown> }): React.ReactEle
     else if (!run) return;
     else if (action === 'open') {
       const step = logStepOf(run);
-      if (!run.logs.length) ctx.toast('This run has no logs yet.', 'info');
-      else ctx.nav.push('agents.log', { card: run.card, dir: run.dir, ...(step ? { step: step.step, stepLabel: step.label } : {}) });
+      ctx.nav.push('agents.card', { ...(job ? { job } : { card: run.card }), dir: run.dir, ...(step ? { step: step.step } : {}) });
     } else if (action === 'cancel') {
       if (!live) ctx.toast(`${run.card} is not running, so there is nothing to cancel.`, 'info');
       else void ctx.actions.run(cancelSpec(run.card, liveStep));
@@ -443,7 +442,7 @@ export function Runs(props: { params: Record<string, unknown> }): React.ReactEle
     if (record.prUrl) tail.push(seg('PR ', theme.dim), seg(record.prUrl.replace(/^https?:\/\//, ''), theme.accent), seg('   '));
     if (labels) tail.push(seg('labels ', theme.dim), seg(labels.join(' ') || 'none'));
     detail.push(tail);
-  } else if (run) detail.push([seg('This run has logs only. Enter opens them.', theme.dim)]);
+  } else if (run) detail.push([seg('This run has logs only. Enter opens it.', theme.dim)]);
 
   return h(
     Box,
