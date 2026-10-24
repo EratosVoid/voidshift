@@ -15,6 +15,7 @@ import {
   planBody,
   qaPassed,
   stageLabels,
+  stepStageLabels,
   verdictBlock,
   type StepResult,
 } from './workflow.ts';
@@ -27,7 +28,7 @@ import { noTracker, type Tracker, type Trackers } from './tracker.ts';
 import { recall, syncMemory, vaultPath } from './memory.ts';
 import type { RunEvent, RunKind } from './notify.ts';
 import { claudeSettingsFile, readRules, rulesSection } from './profile.ts';
-import { acquireWorkspace, addUsage, clearCurrent, closeStale, heldByOther, isPaused, liveRuns, queueHandoffs, readCurrent, readHandoffs, readPending, readWindow, releaseWorkspace, takeHandoff, writeHandoffs, type Handoff, writeCurrent, writePending, writeRun, writeWorkspace, readCronState, writeCronState, type Current, type Pending, type RunRecord, type StepRecord, type Usage } from './state.ts';
+import { acquireWorkspace, addUsage, formatDuration, usageText, clearCurrent, closeStale, heldByOther, isPaused, liveRuns, queueHandoffs, readCurrent, readHandoffs, readPending, readWindow, releaseWorkspace, takeHandoff, writeHandoffs, type Handoff, writeCurrent, writePending, writeRun, writeWorkspace, readCronState, writeCronState, type Current, type Pending, type RunRecord, type StepRecord, type Usage } from './state.ts';
 import { WINDOW_MS, clock, refreshWindow, windowHold, windowStale } from './usage.ts';
 
 const stamp = () => new Date().toISOString().replace(/[:.]/g, '-');
@@ -88,13 +89,48 @@ export function lastLine(output: string): string {
   return output.split('\n').map((l) => l.trim()).filter(Boolean).at(-1)?.slice(0, 300) ?? '';
 }
 
+// How much of a step's output its card comment carries.
+const STEP_TAIL_LINES = 40;
+const STEP_COMMENT_CAP = 4000;
+
+export interface StepReport {
+  label: string;
+  // done, failed, blocked, or the verdict.
+  outcome: string;
+  ms: number;
+  usage?: Usage;
+  output?: string;
+  error?: string;
+  command?: boolean;
+  // File name of the step's log inside the run folder.
+  log?: string;
+}
+
+// The card comment for one finished custom step: label, outcome, time and
+// usage, then the agent's answer or the tail of what the command printed.
+export function stepComment(s: StepReport): string {
+  const heading = [`**${s.label}**: ${s.outcome}`, formatDuration(s.ms), usageText(s.usage)].filter(Boolean).join(' · ');
+  const output = s.output?.trim() ?? '';
+  let text = output ? (s.command ? output.split('\n').slice(-STEP_TAIL_LINES).join('\n') : output) : s.error?.trim() ?? '';
+  if (!text) return heading;
+  // A command keeps its last lines, an agent its opening ones.
+  const cut = text.length > STEP_COMMENT_CAP;
+  if (cut) text = s.command ? text.slice(-STEP_COMMENT_CAP) : text.slice(0, STEP_COMMENT_CAP);
+  const fence = text.includes('```') ? '~~~' : '```';
+  const body = s.command ? `${fence}\n${text}\n${fence}` : text;
+  const note = cut ? `\n\n(cut to 4,000 characters${s.log ? `, full log: ${s.log}` : ''})` : '';
+  return `${heading}\n\n${body}${note}`;
+}
+
 // The run in progress, so a cancel signal can mark it.
 let active: { record: RunRecord; runDir: string } | null = null;
 
 const isVerdict = (d: ResolvedStep) => d.output === 'verdict';
 const isProducer = (d: ResolvedStep) => d.output === 'plan' || d.output === 'commits';
-// The card label for a step: its own for a built-in step, a generic one otherwise.
-const stageOf = (d: ResolvedStep) => LABELS.stage[d.builtin ?? ''] ?? LABELS.working;
+// The card label for a step: its own for a built-in step, vs-<id> for a custom
+// one, and a generic one for a custom step whose label is taken by a trigger.
+const stageOf = (d: ResolvedStep, custom: ReadonlySet<string>) =>
+  LABELS.stage[d.builtin ?? ''] ?? (custom.has(LABELS.step(d.id)) ? LABELS.step(d.id) : LABELS.working);
 
 // One card through a trigger's workflow. Steps run in order. A failed check (or a
 // run of consecutive checks) sends its findings back to the nearest earlier
@@ -111,6 +147,9 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
   // Write back settings apply to card runs; a scheduled run has nothing to write to.
   const writeBack = isCardTrigger(trigger) ? (workflow.writeBack ?? {}) : {};
   const labelsOn = writeBack.labels !== false;
+  // Custom steps each get a comment, and their own stage labels are cleaned off.
+  const stepsOn = isCardTrigger(trigger) && writeBack.steps !== false;
+  const custom = stepStageLabels(config.workflows);
   const cronRun = trigger.source === 'cron';
   const startedAt = new Date().toISOString();
   const workspace = workspaceOf(project);
@@ -150,20 +189,33 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
     loops = n;
   };
   const stage = async (name: string, round?: number) => {
-    if (labelsOn) await linear.setLabels(card, stageLabels(card.labels, label, name, round));
+    if (labelsOn) await linear.setLabels(card, stageLabels(card.labels, label, name, round, custom));
   };
   // How a run ends on the card: a stage label, or with labels off only the
   // trigger taken away so the card is not picked up again.
   const endLabels = (name: string, round?: number) =>
-    linear.setLabels(card, labelsOn ? stageLabels(card.labels, label, name, round) : card.labels.filter((l) => l !== label));
-  // The tracker hears from the runner twice: the plan once it has passed review,
-  // and one final comment. Findings stay here until the final one.
+    linear.setLabels(card, labelsOn ? stageLabels(card.labels, label, name, round, custom) : card.labels.filter((l) => l !== label));
+  // The tracker hears from the runner: the plan once it has passed review, one
+  // comment per custom step, and one final comment. Findings stay here until
+  // the final one.
   let lastFindings = '';
   let planToPost: string | null = null;
   const postPlan = async () => {
     if (planToPost === null) return;
     await linear.comment(card, `${PLAN_HEADING}\n\n${planToPost}`);
     planToPost = null;
+  };
+
+  // One comment per finished custom step. A tracker that refuses it is logged
+  // and never ends the run.
+  const reportStep = async (def: ResolvedStep, rec: StepRecord, r: { output?: string; error?: string } = {}) => {
+    if (def.builtin || !stepsOn) return;
+    const ms = Date.parse(rec.endedAt ?? new Date().toISOString()) - Date.parse(rec.startedAt);
+    try {
+      await linear.comment(card, stepComment({ label: def.label, outcome: rec.result ?? 'done', ms, usage: rec.usage, output: r.output, error: r.error, command: !!def.command, log: rec.log }));
+    } catch (err) {
+      say(`could not post the ${def.label} step on the card: ${(err as Error).message}`);
+    }
   };
 
   const ping = async (kind: RunKind, reason?: string) => {
@@ -213,7 +265,7 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
       throw new Park('No plan comment (starting with "## Plan") was found. Publish a plan first, or start the workflow with Plan.');
     }
 
-    await stage(stageOf(steps[from]!));
+    await stage(stageOf(steps[from]!, custom));
     const base = project.base || defaultBranch(project.path);
     const vault = vaultPath(rc.configDir);
     // Your profile rides along on every step: rules in the prompt, Claude settings as a file.
@@ -257,6 +309,7 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
       if (!def.command && (!def.write || def.builtin === 'vs-qa')) resetWorktree(worktree);
       if (!r.ok) {
         end(rec, 'failed', r.output, log, !!def.command);
+        await reportStep(def, rec, r);
         throw new Park(`The ${def.label} step failed: ${r.error}. Log: ${basename(log)}`, 'failed');
       }
       return r;
@@ -311,6 +364,7 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
       const r = await agent(def, rec, log, buildPrompt({ skill: def.prompt(), card, plan: planText(), base, round, extra: [known, ciNote, UNATTENDED].filter(Boolean).join('\n\n') }));
       const verdict = parseVerdict(r.output);
       end(rec, verdict, r.output, log);
+      await reportStep(def, rec, r);
       await handOff(def, rec, r.output);
       return { step: label, verdict, report: r.output };
     }
@@ -329,7 +383,7 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
         setRound(round);
         const results: StepResult[] = [];
         for (const s of steps.slice(start, end)) {
-          await stage(stageOf(s), round);
+          await stage(stageOf(s, custom), round);
           results.push(await check(s, round));
         }
         if (qaPassed(results)) {
@@ -356,12 +410,13 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
 
       if (def.output === 'plan') {
         setRound(runs.plan + 1);
-        await stage(stageOf(def), runs.plan + 1);
+        await stage(stageOf(def, custom), runs.plan + 1);
         const rec = begin(def);
         const log = logFile(def.builtin ? 'plan' : def.id);
         const r = await agent(def, rec, log, buildPrompt({ skill: def.prompt(), card, plan: plan ?? '(none yet, you are writing it)', base, round: runs.plan + 1, findings: findings.get(i), extra: [known, UNATTENDED].filter(Boolean).join('\n\n') }));
         const result = parseDevResult(r.output);
         end(rec, result.status === 'blocked' ? 'blocked' : 'done', r.output, log);
+        await reportStep(def, rec, r);
         if (result.status === 'blocked') throw new Park(`The plan agent stopped: ${result.reason}`);
         await handOff(def, rec, r.output);
         plan = planBody(r.output);
@@ -372,16 +427,18 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
         const rec = begin(def);
         push(worktree, card.branchName);
         end(rec, 'pushed');
+        await reportStep(def, rec);
       } else if (def.output === 'commits') {
         await postPlan();
         setRound(runs.dev + 1);
-        await stage(stageOf(def), runs.dev + 1);
+        await stage(stageOf(def, custom), runs.dev + 1);
         const rec = begin(def);
         const log = logFile(def.builtin ? 'dev' : def.id);
         const before = headSha(worktree);
         const dev = await agent(def, rec, log, buildPrompt({ skill: def.prompt(), card, plan: planText(), base, round: runs.dev + 1, findings: findings.get(i), extra: [known, UNATTENDED].filter(Boolean).join('\n\n') }));
         const result = parseDevResult(dev.output);
         end(rec, result.status === 'blocked' ? 'blocked' : 'done', dev.output, log);
+        await reportStep(def, rec, dev);
         if (result.status === 'blocked') throw new Park(`The dev agent stopped: ${result.reason}`);
         await handOff(def, rec, dev.output);
         if (commitsAhead(worktree, base) === 0) throw new Park('The dev agent made no commits.');
@@ -398,11 +455,12 @@ export async function runCard(card: Card, trigger: Trigger, workflowName: string
         runs.dev++;
       } else {
         // A step with no output the workflow reads: it runs once and must finish.
-        await stage(stageOf(def), loops || undefined);
+        await stage(stageOf(def, custom), loops || undefined);
         const rec = begin(def);
         const log = logFile(def.id);
         const r = await agent(def, rec, log, buildPrompt({ skill: def.prompt(), card, plan: plan ?? '(none)', base, round: loops || 1, extra: [known, UNATTENDED].filter(Boolean).join('\n\n') }));
         end(rec, 'done', r.output, log, !!def.command);
+        await reportStep(def, rec, r);
         await handOff(def, rec, r.output);
       }
       findings.delete(i);
@@ -629,6 +687,7 @@ export async function nextJob(rc: RunContext, only?: string, workflowName?: stri
 // Retries tracker writes that failed while parking. Never throws.
 async function flushPending(rc: RunContext): Promise<void> {
   const left: Pending[] = [];
+  const custom = stepStageLabels(rc.config.workflows);
   for (const p of readPending(rc.configDir)) {
     try {
       const tracker = rc.trackers(p.source ?? 'linear');
@@ -637,7 +696,7 @@ async function flushPending(rc: RunContext): Promise<void> {
         await tracker.comment(card, p.comment);
         p.comment = '';
       }
-      await tracker.setLabels(card, withLabels(card, (l) => p.drop.includes(l) || (!!p.dropStatus && isStatusLabel(l)), p.add));
+      await tracker.setLabels(card, withLabels(card, (l) => p.drop.includes(l) || (!!p.dropStatus && isStatusLabel(l, custom)), p.add));
     } catch {
       left.push(p);
     }
@@ -651,11 +710,11 @@ async function flushPending(rc: RunContext): Promise<void> {
 
 // Takes the working label off a cancelled card and says so. When the tracker
 // cannot be reached the same change is queued for the next tick.
-export async function cancelCard(tracker: Tracker, configDir: string, cardId: string, label: string, source: 'linear' | 'voidtrack' = 'linear'): Promise<boolean> {
+export async function cancelCard(tracker: Tracker, configDir: string, cardId: string, label: string, source: 'linear' | 'voidtrack' = 'linear', custom: ReadonlySet<string> = new Set()): Promise<boolean> {
   const comment = `**Cancelled.** Add \`${label}\` again to restart.`;
   try {
     const card = await tracker.card(cardId);
-    await tracker.setLabels(card, withLabels(card, isStatusLabel, []));
+    await tracker.setLabels(card, withLabels(card, (l) => isStatusLabel(l, custom), []));
     await tracker.comment(card, comment);
     return true;
   } catch {
@@ -718,7 +777,7 @@ export async function tick(rc: RunContext, only?: string, opts: { workflow?: str
       const { card, trigger } = running.record;
       const source = running.record.source ?? 'linear';
       const timeout = new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 5000).unref());
-      const work = (async () => cancelCard(rc.trackers(source), rc.configDir, card, trigger, source))().catch(() => false);
+      const work = (async () => cancelCard(rc.trackers(source), rc.configDir, card, trigger, source, stepStageLabels(rc.config.workflows)))().catch(() => false);
       const finished = await Promise.race([work, timeout]);
       // Did not finish in time: leave the work for the next tick.
       if (!finished) queueCancel(rc.configDir, card, `**Cancelled.** Add \`${trigger}\` again to restart.`, source);

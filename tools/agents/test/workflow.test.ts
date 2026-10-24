@@ -6,6 +6,7 @@ import {
   isRoundLabel,
   isStatusLabel,
   stageLabels,
+  stepStageLabels,
   latestPlan,
   parseDevResult,
   parseVerdict,
@@ -72,6 +73,19 @@ test('a card keeps one stage label and one version label', () => {
   assert.deepEqual(stageLabels(['Feature', 'vs-dev', 'vs-v2'], 'vs-start', 'vs-qa', 2), ['Feature', 'vs-qa', 'vs-v2']);
   assert.deepEqual(stageLabels(['Feature', 'vs-qa', 'vs-v3'], 'vs-start', 'vs-parked', 3), ['Feature', 'vs-parked', 'vs-v3']);
   assert.deepEqual(stageLabels(['vs-start'], 'vs-start', 'vs-planning'), ['vs-planning']);
+});
+
+test('custom step labels are status labels only when given, and never a trigger label', () => {
+  const custom = stepStageLabels({
+    a: { triggers: [{ source: 'linear', team: 'ENG', label: 'vs-start' }], steps: ['vs-dev', { id: 'editor' }, { id: 'merge' }, { id: 'start' }] },
+    b: { triggers: [{ source: 'cron' }], steps: [{ id: 'logos' }] },
+  });
+  assert.deepEqual([...custom], ['vs-editor', 'vs-merge', 'vs-logos']);
+  assert.ok(isStatusLabel('vs-editor', custom));
+  assert.ok(!isStatusLabel('vs-editor'));
+  assert.ok(!isStatusLabel('vs-start', custom));
+  assert.deepEqual(stageLabels(['Feature', 'vs-start', 'vs-editor'], 'vs-start', 'vs-merge', undefined, custom), ['Feature', 'vs-merge']);
+  assert.deepEqual(stageLabels(['Feature', 'vs-merge'], 'vs-start', 'vs-qa-verified', undefined, custom), ['Feature', 'vs-qa-verified']);
 });
 
 test('status labels never include the trigger labels people use', () => {

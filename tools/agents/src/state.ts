@@ -234,6 +234,12 @@ export function addUsage(total: RunUsage | undefined, step: Usage): RunUsage {
   return out;
 }
 
+export function formatDuration(ms: number): string {
+  const min = Math.round(ms / 60_000);
+  if (min < 1) return '<1m';
+  return min < 60 ? `${min}m` : `${Math.floor(min / 60)}h${min % 60 ? ` ${min % 60}m` : ''}`;
+}
+
 // "12.3k in, 4.1k out, 1.2M cached, $0.42 est.", or empty with nothing to show.
 export function usageText(u: Usage | RunUsage | undefined): string {
   if (!u) return '';

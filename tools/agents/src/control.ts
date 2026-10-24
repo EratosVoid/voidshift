@@ -3,13 +3,13 @@ import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, r
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 import { DEFAULTS, agentsDir, isCardTrigger, readAgentsConfig, workspaceOf, workspacesInUse, type AgentsConfig, type Tracker as Kind } from './config.ts';
-import { STOPPED_REASON, isPaused, lastSeen, listRuns, ours, clearLock, liveCurrent, liveRuns, readCurrent, readWindow, setPaused, usageText, workspaceLocks, writeRun, type Current, type RunEntry } from './state.ts';
+import { STOPPED_REASON, formatDuration, isPaused, lastSeen, listRuns, ours, clearLock, liveCurrent, liveRuns, readCurrent, readWindow, setPaused, usageText, workspaceLocks, writeRun, type Current, type RunEntry } from './state.ts';
 import { windowHold, windowLine } from './usage.ts';
 import { runnerService } from './service.ts';
 import { TRACKERS, trackersFor, type Tracker, type Trackers } from './tracker.ts';
 import type { Card } from './linear.ts';
 import { parseFrom, resolveName, stepNames } from './names.ts';
-import { isStatusLabel } from './workflow.ts';
+import { isStatusLabel, stepStageLabels } from './workflow.ts';
 import { cancelCard, dispatch, gateReason, tick } from './runner.ts';
 import { notifyRun, notifyRunner, sendSummary, type RunEvent } from './notify.ts';
 import type { Check, ToolCommand, ToolContext } from './types.ts';
@@ -54,12 +54,6 @@ export function parseAge(input: string): number | null {
   const m = /^(\d+)([dh])$/.exec(input.trim());
   if (!m || !Number(m[1])) return null;
   return Number(m[1]) * (m[2] === 'd' ? 24 * HOUR : HOUR);
-}
-
-export function formatDuration(ms: number): string {
-  const min = Math.round(ms / 60_000);
-  if (min < 1) return '<1m';
-  return min < 60 ? `${min}m` : `${Math.floor(min / 60)}h${min % 60 ? ` ${min % 60}m` : ''}`;
 }
 
 // Run folders are named like 2026-10-20T14-03-00-123Z.
@@ -245,7 +239,7 @@ const realDeps = (ctx: ToolContext): CancelDeps => ({
   sleep,
   cancelCard: async (card, label, source) => {
     try {
-      return await cancelCard(trackersFor(ctx.configDir)(source), ctx.configDir, card, label, source);
+      return await cancelCard(trackersFor(ctx.configDir)(source), ctx.configDir, card, label, source, stepStageLabels(readAgentsConfig(ctx.configDir).workflows));
     } catch {
       return false;
     }
@@ -567,7 +561,8 @@ const retry = guard(async (args, ctx) => {
     chosen = candidates[0]!;
   }
   const label = config.workflows[chosen]!.triggers.filter(isCardTrigger).find((t) => t.source === source && t.team === card.teamKey)!.label;
-  const next = card.labels.filter((n) => !isStatusLabel(n));
+  const custom = stepStageLabels(config.workflows);
+  const next = card.labels.filter((n) => !isStatusLabel(n, custom));
   if (!next.includes(label)) next.push(label);
   await l.setLabels(card, next);
   const state = runnerState(ctx);

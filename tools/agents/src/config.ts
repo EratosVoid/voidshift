@@ -132,6 +132,8 @@ export interface WriteBack {
   // A state to move a verified card to; null never moves it.
   state?: string | null;
   comment?: boolean;
+  // One comment per finished custom step; on unless false.
+  steps?: boolean;
 }
 
 // A workflow starts on its triggers, runs its steps in order, in its project.

@@ -183,6 +183,15 @@ test('a failed command step ends the run failed', async () => {
   assert.ok(logs.some((l) => l.includes('failed: The scan step failed')));
 });
 
+test('a scheduled command run writes nothing to a tracker', async () => {
+  const writes: string[] = [];
+  const { rc, logs } = setup({}, { comment: async () => void writes.push('comment'), setLabels: async () => void writes.push('labels') });
+  rc.config.projects.p = { path: fakeRepo(), base: 'main' };
+  const workflow: Workflow = { triggers: [cronTrigger], steps: [{ id: 'scan', run: 'echo hi', output: 'none' }, { id: 'boom', run: 'exit 2', output: 'none' }], maxRounds: 1, project: 'p' };
+  assert.equal(await runCard(cronCard('scout', 'Scout', new Date()), cronTrigger, 'scout', workflow, rc.config.projects.p, rc), 'failed', logs.join('\n'));
+  assert.deepEqual(writes, []);
+});
+
 test('closeStale closes a running record with no live lock and leaves a live one', () => {
   const configDir = tmp();
   const make = (card: string, stamp: string) => {

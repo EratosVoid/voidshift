@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { AGENTS, AGENT_FILE, DEFAULT_WORKSPACE, OUTPUTS, STEP_ID, WORKSPACE_NAME, isBuiltin, readAgentFolder, stepFile, type AgentsConfig, type Step, type StepDef, type StepId, type Trigger, type Workflow, describeTrigger, triggerSpec } from './config.ts';
 import { parseCron } from './cron.ts';
+import { LABELS } from './workflow.ts';
 
 const isInt = (v: unknown, min: number, max: number) => typeof v === 'number' && Number.isInteger(v) && v >= min && v <= max;
 
@@ -76,6 +77,11 @@ export function validateWorkflow(config: Pick<AgentsConfig, 'enabled' | 'project
       ids.add(id);
     }
   }
+  // A step's own label must not be a label some workflow starts on.
+  const labels = new Set([workflow, ...Object.values(config.workflows ?? {})].flatMap((w) => (Array.isArray(w.triggers) ? w.triggers : []).map((t) => (t as { label?: string }).label)));
+  for (const id of ids) {
+    if (labels.has(LABELS.step(id))) problems.push(`Step ${id} would label the card ${LABELS.step(id)}, which a workflow starts on. Rename the step.`);
+  }
   if (!config.projects[workflow.project]) problems.push(`Project ${workflow.project} does not exist.`);
   if (!isInt(workflow.maxRounds, 1, 9)) problems.push('Rounds must be a whole number from 1 to 9.');
   const wb = workflow.writeBack;
@@ -84,6 +90,7 @@ export function validateWorkflow(config: Pick<AgentsConfig, 'enabled' | 'project
     else {
       if (wb.labels !== undefined && typeof wb.labels !== 'boolean') problems.push('writeBack.labels must be true or false.');
       if (wb.comment !== undefined && typeof wb.comment !== 'boolean') problems.push('writeBack.comment must be true or false.');
+      if (wb.steps !== undefined && typeof wb.steps !== 'boolean') problems.push('writeBack.steps must be true or false.');
       if (wb.state !== undefined && wb.state !== null && (typeof wb.state !== 'string' || !wb.state.trim())) problems.push('writeBack.state must be a state name, or null to never move the card.');
     }
   }
