@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
-import { cancelCard, dispatch, findJobs, nextJob, runCard, summarize, tick, type ChildRun, type RunContext } from '../src/runner.ts';
+import { cancelCard, dispatch, findJobs, nextJob, runCard, stepComment, summarize, tick, type ChildRun, type RunContext } from '../src/runner.ts';
 import { DEFAULTS } from '../src/config.ts';
 import type { Card } from '../src/linear.ts';
 import type { Tracker } from '../src/tracker.ts';
@@ -287,6 +287,46 @@ test('cancelCard drops the working label and comments', async () => {
   const linear = { card: async () => card(['vs-working', 'keep']), setLabels: async (_c: Card, n: string[]) => void calls.push(`labels:${n}`), comment: async (_c: Card, b: string) => void calls.push(b) } as unknown as Linear;
   assert.equal(await cancelCard(linear, configDir, 'ENG-1', 'go'), true);
   assert.deepEqual(calls, ['labels:keep', '**Cancelled.** Add `go` again to restart.']);
+});
+
+test('cancelCard drops a custom step label it is given', async () => {
+  const calls: string[] = [];
+  const { configDir } = setup({});
+  const linear = { card: async () => card(['vs-editor', 'keep']), setLabels: async (_c: Card, n: string[]) => void calls.push(`labels:${n}`), comment: async () => {} } as unknown as Linear;
+  assert.equal(await cancelCard(linear, configDir, 'ENG-1', 'go', 'linear', new Set(['vs-editor'])), true);
+  assert.deepEqual(calls, ['labels:keep']);
+});
+
+test('stepComment heads with label, outcome, time and usage', () => {
+  assert.equal(stepComment({ label: 'Editor', outcome: 'done', ms: 20_000, output: '  The brief.\n' }), '**Editor**: done · <1m\n\nThe brief.');
+  assert.equal(
+    stepComment({ label: 'Editor', outcome: 'SHIP', ms: 3 * 60_000, usage: { input: 12_300, output: 4_100, costUsd: 0.42 }, output: 'ok' }),
+    '**Editor**: SHIP · 3m · 12.3k in, 4.1k out, $0.42 est.\n\nok',
+  );
+  assert.equal(stepComment({ label: 'Merge', outcome: 'done', ms: 0, output: '', command: true }), '**Merge**: done · <1m');
+});
+
+test('stepComment keeps the last 40 lines of a command in a fence', () => {
+  const lines = Array.from({ length: 50 }, (_, i) => `line ${i + 1}`);
+  const body = stepComment({ label: 'Merge', outcome: 'done', ms: 0, output: lines.join('\n') + '\n', command: true }).split('\n\n')[1]!;
+  assert.equal(body, ['```', ...lines.slice(10), '```'].join('\n'));
+  assert.match(stepComment({ label: 'Merge', outcome: 'done', ms: 0, output: 'a ``` b', command: true }), /~~~\na ``` b\n~~~$/);
+});
+
+test('stepComment cuts at 4,000 characters, a command from the end and an agent from the start', () => {
+  const long = 'a'.repeat(3000) + 'b'.repeat(3000);
+  const agent = stepComment({ label: 'Editor', outcome: 'done', ms: 0, output: long, log: '01-editor.log' });
+  assert.ok(agent.includes('a'.repeat(3000) + 'b'.repeat(1000) + '\n\n(cut to 4,000 characters, full log: 01-editor.log)'));
+  assert.ok(!agent.includes('b'.repeat(1001)));
+  const command = stepComment({ label: 'Merge', outcome: 'done', ms: 0, output: long, command: true, log: '00-merge.log' });
+  assert.ok(command.includes('```\n' + 'a'.repeat(1000) + 'b'.repeat(3000) + '\n```\n\n(cut to 4,000 characters, full log: 00-merge.log)'));
+  assert.ok(!command.includes('a'.repeat(1001)));
+  assert.ok(!stepComment({ label: 'Editor', outcome: 'done', ms: 0, output: 'short' }).includes('cut to'));
+});
+
+test('stepComment falls back to the error when a failed step printed nothing', () => {
+  assert.equal(stepComment({ label: 'Merge', outcome: 'failed', ms: 0, output: '', error: 'conflict', command: true }), '**Merge**: failed · <1m\n\n```\nconflict\n```');
+  assert.equal(stepComment({ label: 'Editor', outcome: 'failed', ms: 0, error: 'out of credits' }), '**Editor**: failed · <1m\n\nout of credits');
 });
 
 test('cancelCard queues a pending entry when Linear fails', async () => {

@@ -69,9 +69,10 @@ voidtrack:ORG:vs-start                # the same for VoidTrack (vsf agents key -
 A schedule fires once when due (a missed one is made up within a day) and
 `vsf agents run --workflow NAME` fires it now. The runner checks every minute, works in its own copy of the repo so
 your checkout is never touched, and keeps two labels on the card as it goes: the
-stage (`vs-planning`, `vs-plan-review`, `vs-dev`, `vs-qa`, then `vs-qa-verified`
-or `vs-parked`) and the round (`vs-v1`, `vs-v2`). On Linear it posts the plan and
-one final comment, nothing in between.
+stage (`vs-planning`, `vs-plan-review`, `vs-dev`, `vs-qa`, `vs-<id>` for a step
+of your own, then `vs-qa-verified` or `vs-parked`) and the round (`vs-v1`,
+`vs-v2`). On the card it posts the plan, one comment per step of your own, and
+one final comment.
 
 ```sh
 vsf agents status                  # runner, the card each workspace is on, parked cards
@@ -122,7 +123,7 @@ it. Steps are the built-in ids above or your own:
   "steps": [{ "id": "brief", "prompt": "brief.md", "output": "none", "model": "haiku", "timeoutMinutes": 10 }],
   "maxRounds": 1,
   "project": "tether-relay",
-  "writeBack": { "labels": true, "state": null, "comment": true }
+  "writeBack": { "labels": true, "state": null, "comment": true, "steps": true }
 }
 ```
 
@@ -133,7 +134,11 @@ for `commits`. A `publish` step takes no prompt; the others take one `prompt`
 file or `skill`, which must ask for a `RESULT:` line (`plan`, `commits`) or a
 `VERDICT:` line (`verdict`). `writeBack` applies to card runs: `state` moves a
 verified card there (`null` never moves it), `labels: false` only takes the
-trigger label off, and `comment: false` skips the closing comment. Edit the file,
+trigger label off, `comment: false` skips the closing comment, and `steps:
+false` skips the comment each of your own steps posts when it ends (its outcome,
+time, tokens and cost, then the agent's answer or the last 40 lines a command
+printed, cut at 4,000 characters). While one of your steps runs the card carries
+`vs-<id>`, for example `vs-editor`, so its id must not make a trigger label. Edit the file,
 then `vsf agents validate`.
 
 A step can run a shell command instead of an agent: `"run": "node sweep.mjs"`

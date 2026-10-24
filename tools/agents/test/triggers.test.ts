@@ -415,7 +415,58 @@ test('writeBack: labels off, a fixed state and no closing comment', async () => 
     writeBack: { labels: false, state: 'Done', comment: false },
   });
   assert.equal(await run(), 'verified', logs.join('\n'));
-  assert.deepEqual(writes, ['move:Done', 'labels:keep']);
+  assert.deepEqual(writes, ['comment:**brief**: done · <1m\n\ndone', 'move:Done', 'labels:keep']);
+});
+
+test('a card run posts one comment per custom step, in order, under its own label', async () => {
+  const rig = agentRig('echo brief written\n');
+  const { writes, logs, run } = cardRig(rig, {
+    triggers: [vtTrigger],
+    steps: [{ id: 'scan', run: 'echo scanned', output: 'none' }, { id: 'editor', label: 'Editor', prompt: 'brief.md', output: 'none' }],
+    maxRounds: 1,
+    project: 'p',
+    writeBack: { state: null },
+  });
+  assert.equal(await run(), 'verified', logs.join('\n'));
+  // The run start and the first step both set the first step's label.
+  assert.deepEqual(writes, [
+    'labels:keep,vs-scan',
+    'labels:keep,vs-scan',
+    'comment:**scan**: done · <1m\n\n```\nscanned\n```',
+    'labels:keep,vs-editor',
+    'comment:**Editor**: done · <1m\n\nbrief written',
+    'labels:keep,vs-qa-verified',
+    'comment:**All checks passed.**',
+  ]);
+});
+
+test('a failed command step posts its output tail before the park comment', async () => {
+  const rig = agentRig('echo unused\n');
+  const { writes, logs, run } = cardRig(rig, {
+    triggers: [vtTrigger],
+    steps: [{ id: 'merge', run: 'echo merging; echo conflict >&2; exit 1', output: 'none' }],
+    maxRounds: 1,
+    project: 'p',
+  });
+  assert.equal(await run(), 'failed', logs.join('\n'));
+  const comments = writes.filter((w) => w.startsWith('comment:'));
+  assert.equal(comments.length, 2, writes.join('\n'));
+  assert.equal(comments[0], 'comment:**merge**: failed · <1m\n\n```\nmerging\n```');
+  assert.match(comments[1]!, /^comment:\*\*Parked:\*\* The merge step failed: conflict/);
+  assert.equal(writes.at(-1), 'labels:keep,vs-parked');
+});
+
+test('writeBack.steps false posts no step comments', async () => {
+  const rig = agentRig('echo done\n');
+  const { writes, logs, run } = cardRig(rig, {
+    triggers: [vtTrigger],
+    steps: [{ id: 'scan', run: 'echo scanned', output: 'none' }, { id: 'brief', prompt: 'brief.md', output: 'none' }],
+    maxRounds: 1,
+    project: 'p',
+    writeBack: { state: null, steps: false },
+  });
+  assert.equal(await run(), 'verified', logs.join('\n'));
+  assert.deepEqual(writes.filter((w) => w.startsWith('comment:')), ['comment:**All checks passed.**']);
 });
 
 test('writeBack.state null never moves the card', async () => {

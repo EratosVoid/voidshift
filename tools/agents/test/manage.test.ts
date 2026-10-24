@@ -130,7 +130,7 @@ const agent = (steps: unknown[], o: Record<string, unknown> = {}) => ({ triggers
 const folderCfg = { ...cfg, workflows: {} };
 
 test('validateAgentFolder accepts a good folder', () => {
-  const dir = agentFolder(agent([{ id: 'brief', prompt: 'brief.md', output: 'none' }, { id: 'build', prompt: 'build.md', output: 'commits' }, { id: 'check', prompt: 'check.md', output: 'verdict', engine: 'codex', model: 'o4', timeoutMinutes: 10 }, { id: 'push', output: 'publish' }, 'vs-qa'], { writeBack: { labels: false, state: null, comment: false } }), files);
+  const dir = agentFolder(agent([{ id: 'brief', prompt: 'brief.md', output: 'none' }, { id: 'build', prompt: 'build.md', output: 'commits' }, { id: 'check', prompt: 'check.md', output: 'verdict', engine: 'codex', model: 'o4', timeoutMinutes: 10 }, { id: 'push', output: 'publish' }, 'vs-qa'], { writeBack: { labels: false, state: null, comment: false, steps: false } }), files);
   assert.deepEqual(validateAgentFolder(dir, folderCfg), []);
 });
 
@@ -154,6 +154,8 @@ test('validateAgentFolder reports each problem', () => {
   assert.match(problems([{ id: 'a', prompt: 'brief.md', output: 'verdict' }]), /a prompt never asks for a VERDICT: line/);
   assert.match(problems([{ id: 'a', prompt: 'brief.md', output: 'commits' }]), /a prompt never asks for a RESULT: line/);
   assert.match(problems([{ id: 'a', prompt: 'brief.md', output: 'none' }], { writeBack: { labels: 'no' } }), /writeBack.labels/);
+  assert.match(problems([{ id: 'a', prompt: 'brief.md', output: 'none' }], { writeBack: { steps: 'no' } }), /writeBack.steps must be true or false/);
+  assert.match(problems([{ id: 'start', prompt: 'brief.md', output: 'none' }], { triggers: [{ source: 'linear', team: 'ENG', label: 'vs-start' }] }), /Step start would label the card vs-start, which a workflow starts on/);
   assert.match(problems([{ id: 'a', prompt: 'brief.md', output: 'none', engine: 'gpt' }]), /engine/);
   assert.match(problems([{ id: 'vs-dev', prompt: 'build.md', output: 'commits' }]), /built-in step/);
   assert.match(problems([{ id: 'A b', prompt: 'brief.md', output: 'none' }]), /lowercase/);

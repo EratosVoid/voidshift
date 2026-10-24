@@ -19,8 +19,10 @@ export const LABELS = {
   verified: 'vs-qa-verified',
   parked: 'vs-parked',
   version: (round: number) => `vs-v${round}`,
-  // Labels from earlier runners, still cleaned off cards.
+  // A custom step's own label is vs-<step id>; this one is for a step whose
+  // label would clash with a trigger, and was every custom step's before.
   working: 'vs-working',
+  step: (id: string) => `vs-${id}`,
 };
 
 const STAGE_NAMES = new Set([...Object.values(LABELS.stage), LABELS.changes, LABELS.verified, LABELS.parked, LABELS.working]);
@@ -29,12 +31,31 @@ export const isVersionLabel = (name: string) => /^vs-v\d+$/.test(name);
 // Round labels earlier runners stacked up, one per step and round.
 export const isRoundLabel = (name: string) => /^vs-(plan|review|dev|qa)-v\d+$/.test(name);
 
-export const isStatusLabel = (name: string) => STAGE_NAMES.has(name) || isVersionLabel(name) || isRoundLabel(name);
+const EMPTY: ReadonlySet<string> = new Set();
+
+// `custom` is the custom step labels in use, from stepStageLabels.
+export const isStatusLabel = (name: string, custom: ReadonlySet<string> = EMPTY) =>
+  STAGE_NAMES.has(name) || isVersionLabel(name) || isRoundLabel(name) || custom.has(name);
+
+// The vs-<id> label of every custom step in every workflow, minus any label a
+// card trigger starts on, so a step never starts a run by its own label.
+export function stepStageLabels(workflows: Record<string, { triggers?: { source: string; label?: string }[]; steps?: unknown[] }>): Set<string> {
+  const triggers = new Set(Object.values(workflows).flatMap((w) => (w.triggers ?? []).map((t) => t.label).filter((l): l is string => !!l)));
+  const out = new Set<string>();
+  for (const w of Object.values(workflows)) {
+    for (const s of w.steps ?? []) {
+      if (!s || typeof s !== 'object' || typeof (s as { id?: unknown }).id !== 'string') continue;
+      const name = LABELS.step((s as { id: string }).id);
+      if (!triggers.has(name)) out.add(name);
+    }
+  }
+  return out;
+}
 
 // The card's labels with every VoidShift label (and the trigger) replaced by
 // one stage label and, when given, one version label.
-export function stageLabels(current: string[], trigger: string, stage: string, round?: number): string[] {
-  const kept = current.filter((l) => l !== trigger && !isStatusLabel(l));
+export function stageLabels(current: string[], trigger: string, stage: string, round?: number, custom: ReadonlySet<string> = EMPTY): string[] {
+  const kept = current.filter((l) => l !== trigger && !isStatusLabel(l, custom));
   return [...new Set([...kept, stage, ...(round ? [LABELS.version(round)] : [])])];
 }
 
