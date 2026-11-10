@@ -1,0 +1,10 @@
+{
+  "name": "vsf-analytics-ingest",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Stores raw OpenTelemetry payloads from Claude Code and Codex in Postgres. No parsing at ingest.",
+  "engines": { "node": ">=20" },
+  "scripts": { "start": "node server.js" },
+  "dependencies": { "pg": "^8.13.0" }
+}
