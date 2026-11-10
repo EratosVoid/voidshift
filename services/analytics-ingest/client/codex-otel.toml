@@ -1,0 +1,12 @@
+# Append to ~/.codex/config.toml (Codex ignores otel keys in a repo's .codex/config.toml).
+# Syntax built from a summarised doc page: confirm one session lands in otlp_raw before rollout.
+# If Codex rejects the inline form, use the dotted keys from its config reference.
+
+[otel]
+environment = "tether"
+log_user_prompt = true
+exporter = { otlp-http = {
+  endpoint = "https://INGEST_HOST/v1/logs",
+  protocol = "json",
+  headers = { "Authorization" = "Bearer INGEST_TOKEN", "X-Vsf-Source" = "codex" }
+}}
