@@ -15,6 +15,7 @@ to read it.
 | `views.sql` | Optional example parsing: `events` (one row per event, attributes flattened), `daily_usage` (cost and tokens per person per day), `prompts`. |
 | `client/claude-code-settings.json` | Env block for Claude Code. Use as managed settings (cannot be overridden) or user settings. |
 | `client/codex-otel.toml` | Block to append to `~/.codex/config.toml`. |
+| `client/connect-claude-code.md`, `client/connect-codex.md` | Team rollout: a block each person pastes into Claude Code or Codex, which then edits its own config. |
 | `test/smoke.sh` | Posts sample payloads and checks status codes. |
 
 ## Storage
@@ -47,7 +48,8 @@ decompressed first. Each event inside carries `user.email`, `session.id`,
   rows (2 metrics, 1 logs). The `events` view read user_prompt, api_request
   (cost, tokens), assistant_response, hook, plugin and MCP events, with email
   and session on each.
-- Not verified: Codex (syntax from a summarised doc page), Railway deploy.
+- Codex 0.160.0 verified against the Railway deploy: events carry user.email, conversation.id, model and prompt. The connect-codex block was run by Codex itself on a test config and the result exported correctly.
+- Railway deploy verified (DevVoid project).
 
 ## Before the team rollout
 
